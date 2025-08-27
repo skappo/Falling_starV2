@@ -126,13 +126,35 @@ parser.add_argument("--output-queue-maxsize", type=int, help="Dimensione massima
 parser.add_argument("--snapshot-queue-maxsize", type=int, help="Dimensione massima della coda di scrittura snapshot meteore.")
 parser.add_argument("--downscale-factor", type=int, help="Fattore di ridimensionamento per lo stream lores (rilevamento meteore).")
 
-# (Config file loading and argument parsing is unchanged)
-# ...
+# Carica il file config.json se esiste. I suoi valori sovrascrivono i master_defaults.
+if os.path.exists(CONFIG_FILE):
+    with open(CONFIG_FILE, "r") as f:
+        try:
+            config_from_file = json.load(f)
+            parser.set_defaults(**config_from_file)
+            print(f"[CONFIG] Caricata configurazione da {CONFIG_FILE}")
+        except Exception as e:
+            print(f"[WARNING] Impossibile analizzare {CONFIG_FILE}: {e}")
 
+# Se ci sono argomenti dalla riga di comando sovrascrivono TUTTO il resto.
+args = parser.parse_args()
+
+# Salva la configurazione finale
+save_config(args)
+
+# Imposta la strategia di riconoscimento
 STRATEGY = args.strategy
 
 # === LOGGING ===
-# ... (Unchanged)
+# Configura il logging sulla console e su un file `detection_log.log`.
+logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO, force=True)
+if args.no_log_events:
+    logging.disable(logging.CRITICAL)
+
+log_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+file_handler = logging.FileHandler("detection_log.log")
+file_handler.setFormatter(log_formatter)
+logging.getLogger().addHandler(file_handler)
 
 # === PARAMETRI DERIVATI ===
 RESOLUTIONS = {"small": (640, 480), "medium": (1280, 720), "large": (1920, 1080)}
@@ -167,8 +189,30 @@ picam2 = Picamera2()
 HAS_AUTOFOCUS = is_autofocus_camera(picam2) # Rileva una volta all'avvio
 width, height = RESOLUTIONS[args.size]
 
-# === H264 & CODEC SETUP ===
-# ... (Unchanged)
+# === SUPPORTO H264 PER RASPBERRY PI ===
+def start_ffmpeg_writer(filename, width, height, framerate):
+    # Avvia un processo ffmpeg che accetta dati raw in grayscale e li codifica in H.264 su un raspberry utilizzando h264_v4l2m2m. 
+    cmd = [
+        "ffmpeg", "-y", "-f", "rawvideo", "-vcodec", "rawvideo", "-pix_fmt", "gray",
+        "-s", f"{width}x{height}", "-r", str(framerate), "-i", "-", "-an",
+        "-vcodec", "h264_v4l2m2m", # <-- USA L'ENCODER HARDWARE del Raspberry Pi
+        "-preset", "ultrafast", "-crf", "23", filename
+    ]
+    return subprocess.Popen(cmd, stdin=subprocess.PIPE)
+
+# === CODEC ===
+# Determina l'estensione del file e il FourCC per i codec non-H264.
+if args.codec == "avi":
+    fourcc = cv2.VideoWriter_fourcc(*'IYUV')
+    extension = "avi"
+elif args.codec == "mjpeg":
+    fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+    extension = "avi"
+elif args.codec == "h264":
+    fourcc = None
+    extension = "mp4"
+else:
+    raise ValueError("Codec non supportato.")
 
 # === CODE E VAR GLOBALI ===
 # --- Queues ---
@@ -207,13 +251,133 @@ def monitor_thread():
 
 # --- Meteor Finder Threads ---
 def processing_thread(state_event):
-    # ... (Logic is the same, but the main loop checks `state_event.is_set()`)
+    # Preleva i frame, esegue il rilevamento e gestisce la registrazione.
+    global reference_frame, last_event_time, out, ffmpeg_proc, record_start_time
+    # Calcola la soglia di area per lo stream a bassa risoluzione.
+    scaled_trigger_area = args.trigger_area / (args.downscale_factor**2)
+    while running:
+        if not should_run_now():
+            time.sleep(10)
+            continue
+        try:
+            # Prende i 2 frame (alta e bassa risoluzione) dalla coda.
+            full_res_frame, detection_frame = frame_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+        
+        # Analizza quello a bassa risoluzione (`detection_frame`).
+        blurred = cv2.medianBlur(detection_frame, 3)
+        motion_detected = False
+
+        if STRATEGY == "diff":
+            # Logica basata sulla differenza tra frame.
+            if reference_frame is None:
+                reference_frame = blurred.copy().astype("float")
+                continue
+            frame_diff = cv2.absdiff(blurred, cv2.convertScaleAbs(reference_frame))
+            _, thresh = cv2.threshold(frame_diff, args.diff_threshold, 255, cv2.THRESH_BINARY)
+            changed_area = cv2.countNonZero(thresh)
+            motion_detected = changed_area > scaled_trigger_area
+            cv2.accumulateWeighted(blurred, reference_frame, args.learning_rate)
+        else:
+            # Logica basata sulla ricerca di oggetti luminosi.
+            _, thresh = cv2.threshold(blurred, args.min_brightness, 255, cv2.THRESH_BINARY)
+            contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            motion_detected = any(cv2.contourArea(c) > args.min_area for c in contours)
+
+        # Aggiunge il frame ad alta risoluzione al buffer circolare del pre-evento.
+        pre_event_buffer.append(full_res_frame.copy())
+        current_time = time.time()
+
+        # Se viene rilevato un evento e non stiamo già registrando...
+        if motion_detected and not recording_event.is_set() and (current_time - last_event_time > 2):
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = os.path.join(args.output_dir, f"evento_{timestamp}.{extension}")
+            snapshot = os.path.join(args.output_dir, f"snapshot_{timestamp}.jpg")
+            
+            # Mette una richiesta di salvataggio snapshot nella coda.
+            try:
+                snapshot_queue.put((snapshot, full_res_frame.copy()), block=False)
+            except queue.Full:
+                logging.warning("[PROCESS] Coda snapshot piena, snapshot scartato.")            
+            
+            # Avvia la registrazione video (ffmpeg o OpenCV).
+            if args.codec == "h264":
+                ffmpeg_proc = start_ffmpeg_writer(filename, full_res_frame.shape[1], full_res_frame.shape[0], FRAME_RATE)
+            else:
+                out = cv2.VideoWriter(filename, fourcc, FRAME_RATE, (full_res_frame.shape[1], full_res_frame.shape[0]), isColor=False)
+            
+            # Sposta i frame dal buffer del pre-evento nella coda di output per la scrittura.
+            for f in pre_event_buffer:
+                try:
+                    output_queue.put(f, timeout=0.1)
+                except queue.Full:
+                    logging.warning("[PROCESS] Coda di output piena durante la scrittura del pre-evento.")
+
+            # Imposta lo stato di registrazione.
+            recording_event.set()
+            record_start_time = current_time
+            last_event_time = current_time
+            update_perf_counter("events")
+            logging.info(f"[EVENT] Evento rilevato: registrazione iniziata {filename}")
+
+        # Se siamo in stato di registrazione...
+        elif recording_event.is_set():
+            # Aggiunge il frame corrente alla coda di output.
+            try:
+                output_queue.put(full_res_frame, timeout=1)
+            except queue.Full:
+                logging.warning("[PROCESS] Coda di output piena, frame perso")
+
+            # Controlla se la durata della registrazione è terminata.
+            if time.time() - record_start_time > args.record_duration:
+                # Chiude i file e resetta lo stato.
+                if ffmpeg_proc:
+                    if ffmpeg_proc.stdin:
+                        try: ffmpeg_proc.stdin.close()
+                        except BrokenPipeError: pass
+                    ffmpeg_proc.wait()
+                    ffmpeg_proc = None
+                if out:
+                    out.release()
+                    out = None
+                recording_event.clear()
+                logging.info("[EVENT] Registrazione terminata")
 
 def writer_thread(state_event):
-    # ... (Logic is the same, but the main loop checks `state_event.is_set()`)
+    # Gestisce la scrittura dei frame video su disco.
+    global out, ffmpeg_proc
+    while running:
+        try:
+            frame = output_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+        if recording_event.is_set():
+            try:
+                if ffmpeg_proc:
+                    ffmpeg_proc.stdin.write(frame.tobytes())
+                elif out:
+                    out.write(frame)
+                update_perf_counter("written")
+            except BrokenPipeError:
+                logging.error("[WRITE] ffmpeg chiuso inaspettatamente.")
+                recording_event.clear()
+            except Exception as e:
+                logging.error(f"[WRITE] Errore scrittura frame: {e}")
 
 def snapshot_writer_thread(state_event):
-    # ... (Logic is the same, but the main loop checks `state_event.is_set()`)
+    # Gestisce la scrittura degli snapshot su disco.
+    while running:
+        try:
+            snapshot_path, frame_to_save = snapshot_queue.get(timeout=1)
+            start = time.time()
+            cv2.imwrite(snapshot_path, frame_to_save)
+            duration = time.time() - start
+            logging.info(f"[SNAPSHOT] Snapshot salvato in {snapshot_path} ({duration:.3f}s)")
+        except queue.Empty:
+            continue
+        except Exception as e:
+            logging.error(f"[SNAPSHOT] Errore nel salvataggio snapshot: {e}")
 
 # --- Timelapse Threads ---
 def timelapse_capture_thread(state_event):
