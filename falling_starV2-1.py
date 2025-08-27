@@ -1,5 +1,3 @@
-# --- START OF FILE stelle_cadenti_v3_final.py ---
-
 import argparse
 import cv2
 import numpy as np
@@ -62,7 +60,6 @@ pi_model = detect_pi_model()
 # === FUNZIONE PER SALVARE LA CONFIGURAZIONE ===
 CONFIG_FILE = "config.json"
 def save_config(args):
-    """Converte l'oggetto degli argomenti (Namespace) in un dizionario e lo salva come file JSON."""
     try:
         with open(CONFIG_FILE, "w") as f:
             json.dump(vars(args), f, indent=4)
@@ -159,6 +156,9 @@ logging.getLogger().addHandler(file_handler)
 # === PARAMETRI DERIVATI ===
 RESOLUTIONS = {"small": (640, 480), "medium": (1280, 720), "large": (1920, 1080)}
 
+# === ESPOSIZIONE ===
+METEOR_EXPOSURE_LIMITS = (50000, 1000000)
+
 # === FUNZIONI DI SCHEDULING ===
 def is_time_in_interval(start_str, end_str):
     if not start_str or not end_str:
@@ -173,7 +173,7 @@ def is_time_in_interval(start_str, end_str):
 
 # === RILEVAMENTO CAMERA CON AUTOFOCUS ===
 def is_autofocus_camera(picam2_object):
-    """Interroga le proprietà della camera per determinare se ha un autofocus (es. Camera Module 3)."""
+    # Camera Info if v3 disable autofocus
     try:
         model = picam2_object.camera_properties.get('Model', 'unknown').lower()
         if 'imx708' in model:
@@ -182,6 +182,23 @@ def is_autofocus_camera(picam2_object):
     except Exception as e:
         logging.error(f"Impossibile determinare il modello della camera: {e}")
     return False
+
+# === FUNZIONI DI SCHEDULING ===
+def parse_time(t):
+    return datetime.strptime(t, "%H:%M").time() if t else None
+
+start_time = parse_time(args.start_time)
+stop_time = parse_time(args.stop_time)
+
+def should_run_now():
+    now = datetime.now().time()
+    if not start_time and not stop_time: return True
+    if start_time and stop_time:
+        if start_time < stop_time: return start_time <= now < stop_time
+        else: return now >= start_time or now < stop_time # Gestisce l'intervallo a cavallo della mezzanotte
+    if start_time: return now >= start_time
+    if stop_time: return now < stop_time
+    return True
 
 # === INIZIALIZZAZIONE CAMERA (Iniziale) ===
 os.makedirs(args.output_dir, exist_ok=True)
@@ -229,6 +246,20 @@ recording_event = threading.Event()
 out, ffmpeg_proc = None, None
 running = True
 current_state = "IDLE"
+last_event_time = 0
+record_start_time = 0
+frames_captured, frames_processed, frames_written, events_triggered = 0, 0, 0, 0
+lock_perf = threading.Lock()
+
+
+def update_perf_counter(counter_name, increment=1):
+    # Funzione thread-safe per aggiornare i contatori di performance.
+    global frames_captured, frames_processed, frames_written, events_triggered
+    with lock_perf:
+        if counter_name == "captured": frames_captured += increment
+        elif counter_name == "processed": frames_processed += increment
+        elif counter_name == "written": frames_written += increment
+        elif counter_name == "events": events_triggered += increment
 
 # === THREADS ===
 
@@ -460,10 +491,20 @@ if __name__ == "__main__":
                     video_config = picam2.create_video_configuration(
                         main={"size": (width, height), "format": "Y"},
                         lores={"size": (lores_w, lores_h), "format": "Y"},
-                        controls={"FrameDurationLimits": (10000, 33333), "AnalogueGain": args.gain, "FrameRate": args.framerate}
+                        controls={"FrameDurationLimits": METEOR_EXPOSURE_LIMITS, "AnalogueGain": args.gain, "FrameRate": FRAME_RATE}
                     )
                     picam2.configure(video_config)
                     picam2.start()
+                    if args.framerate_mode == 'dynamic':
+                        # In modalità dinamica, interroga i metadati della camera per scoprire il framerate reale
+                        metadata = picam2.capture_metadata()
+                        FRAME_RATE = metadata["FrameRate"]
+                        logging.info(f"[CAMERA] Framerate dinamico rilevato: {FRAME_RATE:.2f} fps")
+                    else:
+                        # In modalità fissa, usa il valore specificato dall'utente
+                        FRAME_RATE = args.framerate
+                        logging.info(f"[CAMERA] Framerate fisso impostato a: {FRAME_RATE} fps")
+                        
                     active_threads = [
                         threading.Thread(target=capture_thread_meteor, args=(state_events['meteor_finder'],), daemon=True),
                         threading.Thread(target=processing_thread, args=(state_events['meteor_finder'],), daemon=True),
