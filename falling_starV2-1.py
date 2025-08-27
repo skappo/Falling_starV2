@@ -73,7 +73,7 @@ parser = argparse.ArgumentParser(description="Rilevamento eventi luminosi e time
 # --- Master defaults ---
 master_defaults = {
     "size": "medium", "binning": True, "gain": 8.0, "codec": "h264", "output_dir": "output",
-    "framerate": 30 if pi_model == "pi5" else 20,
+    "framerate-mode": "fixed", "framerate": 30 if pi_model == "pi5" else 20,
     # Meteor Finder settings
     "meteor_start_time": "22:00", "meteor_end_time": "05:00",
     "strategy": "contour", "record_duration": 10, "pre_event_seconds": 5,
@@ -97,7 +97,8 @@ parser.add_argument("--binning", action="store_true", help="Abilita il binning 2
 parser.add_argument("--gain", type=float, help="[Meteor] Gain analogico per il rilevamento meteore.")
 parser.add_argument("--codec", choices=["avi", "mjpeg", "h264"], help="Codec video per gli eventi di meteore.")
 parser.add_argument("--output-dir", type=str, help="Directory principale per salvare tutti i file.")
-parser.add_argument("--framerate", type=int, help="Framerate target per il rilevamento meteore.")
+parser.add_argument("--framerate-mode", choices=["fixed", "dynamic"], help="Modalità di controllo del framerate per il rilevamento meteore.")
+parser.add_argument("--framerate", type=int, help="Framerate target (usato solo in modalità 'fixed').")
 # Meteor Finder
 parser.add_argument("--meteor-start-time", type=str, help="Orario di inizio per il rilevamento meteore (HH:MM).")
 parser.add_argument("--meteor-end-time", type=str, help="Orario di fine per il rilevamento meteore (HH:MM).")
@@ -183,23 +184,6 @@ def is_autofocus_camera(picam2_object):
         logging.error(f"Impossibile determinare il modello della camera: {e}")
     return False
 
-# === FUNZIONI DI SCHEDULING ===
-def parse_time(t):
-    return datetime.strptime(t, "%H:%M").time() if t else None
-
-start_time = parse_time(args.start_time)
-stop_time = parse_time(args.stop_time)
-
-def should_run_now():
-    now = datetime.now().time()
-    if not start_time and not stop_time: return True
-    if start_time and stop_time:
-        if start_time < stop_time: return start_time <= now < stop_time
-        else: return now >= start_time or now < stop_time # Gestisce l'intervallo a cavallo della mezzanotte
-    if start_time: return now >= start_time
-    if stop_time: return now < stop_time
-    return True
-
 # === INIZIALIZZAZIONE CAMERA (Iniziale) ===
 os.makedirs(args.output_dir, exist_ok=True)
 picam2 = Picamera2()
@@ -248,7 +232,10 @@ running = True
 current_state = "IDLE"
 last_event_time = 0
 record_start_time = 0
-frames_captured, frames_processed, frames_written, events_triggered = 0, 0, 0, 0
+frames_captured = 0
+frames_processed = 0
+frames_written = 0
+events_triggered = 0
 lock_perf = threading.Lock()
 
 
@@ -281,15 +268,12 @@ def monitor_thread():
         time.sleep(15)
 
 # --- Meteor Finder Threads ---
-def processing_thread(state_event):
+def processing_thread(state_event, effective_framerate): 
     # Preleva i frame, esegue il rilevamento e gestisce la registrazione.
     global reference_frame, last_event_time, out, ffmpeg_proc, record_start_time
     # Calcola la soglia di area per lo stream a bassa risoluzione.
     scaled_trigger_area = args.trigger_area / (args.downscale_factor**2)
-    while running:
-        if not should_run_now():
-            time.sleep(10)
-            continue
+    while running and state_event.is_set():
         try:
             # Prende i 2 frame (alta e bassa risoluzione) dalla coda.
             full_res_frame, detection_frame = frame_queue.get(timeout=1)
@@ -334,9 +318,9 @@ def processing_thread(state_event):
             
             # Avvia la registrazione video (ffmpeg o OpenCV).
             if args.codec == "h264":
-                ffmpeg_proc = start_ffmpeg_writer(filename, full_res_frame.shape[1], full_res_frame.shape[0], FRAME_RATE)
+                ffmpeg_proc = start_ffmpeg_writer(filename, full_res_frame.shape[1], full_res_frame.shape[0], effective_framerate)
             else:
-                out = cv2.VideoWriter(filename, fourcc, FRAME_RATE, (full_res_frame.shape[1], full_res_frame.shape[0]), isColor=False)
+                out = cv2.VideoWriter(filename, fourcc, effective_framerate, (full_res_frame.shape[1], full_res_frame.shape[0]), isColor=False)
             
             # Sposta i frame dal buffer del pre-evento nella coda di output per la scrittura.
             for f in pre_event_buffer:
@@ -362,39 +346,77 @@ def processing_thread(state_event):
 
             # Controlla se la durata della registrazione è terminata.
             if time.time() - record_start_time > args.record_duration:
-                # Chiude i file e resetta lo stato.
-                if ffmpeg_proc:
-                    if ffmpeg_proc.stdin:
-                        try: ffmpeg_proc.stdin.close()
-                        except BrokenPipeError: pass
-                    ffmpeg_proc.wait()
-                    ffmpeg_proc = None
-                if out:
-                    out.release()
-                    out = None
+                logging.info("[PROCESS] Durata registrazione terminata. Invio segnale di stop al writer...")
+                try:
+                    # Put the "End of Stream" signal on the queue
+                    output_queue.put(None, timeout=1) 
+                except queue.Full:
+                    # This is a problem, but we must still clear the event
+                    logging.error("[PROCESS] Impossibile inviare il segnale di stop, la coda è piena!")
+    
+                # We still clear the event to stop new frames from being added.
+                pre_event_buffer.clear()
                 recording_event.clear()
                 logging.info("[EVENT] Registrazione terminata")
 
 def writer_thread(state_event):
     # Gestisce la scrittura dei frame video su disco.
-    global out, ffmpeg_proc
-    while running:
+    global out, ffmpeg_proc # Still needs access to the global file handles
+
+    # The main loop checks for both the global running flag and the mode-specific event
+    while running and state_event.is_set():
         try:
-            frame = output_queue.get(timeout=1)
-        except queue.Empty:
-            continue
-        if recording_event.is_set():
-            try:
+            # Attende un oggetto dalla coda. Potrebbe essere un frame o il segnale di stop (None).
+            item = output_queue.get(timeout=1)
+
+            # --- Logica di Chiusura Coordinata ---
+            # Controlla se l'oggetto ricevuto è il segnale di "Fine Stream".
+            if item is None:
+                logging.info("[WRITE] Segnale di stop ricevuto. Finalizzazione del video in corso...")
+                
+                # Chiude in modo sicuro il processo ffmpeg, se attivo
                 if ffmpeg_proc:
-                    ffmpeg_proc.stdin.write(frame.tobytes())
-                elif out:
-                    out.write(frame)
-                update_perf_counter("written")
-            except BrokenPipeError:
-                logging.error("[WRITE] ffmpeg chiuso inaspettatamente.")
-                recording_event.clear()
-            except Exception as e:
-                logging.error(f"[WRITE] Errore scrittura frame: {e}")
+                    if ffmpeg_proc.stdin:
+                        try:
+                            ffmpeg_proc.stdin.close()
+                        except BrokenPipeError:
+                            # Questo può accadere se il processo è terminato in anticipo, è sicuro ignorarlo.
+                            logging.warning("[WRITE] stdin di ffmpeg già chiuso.")
+                            pass
+                    ffmpeg_proc.wait() # Attende che il processo ffmpeg termini completamente
+                    ffmpeg_proc = None # Resetta la variabile globale
+                
+                # Chiude in modo sicuro l'oggetto VideoWriter di OpenCV, se attivo
+                if out:
+                    out.release()
+                    out = None # Resetta la variabile globale
+                
+                logging.info("[WRITE] Video finalizzato e chiuso correttamente.")
+                
+                # Continua al prossimo ciclo per attendere un nuovo task (non esce dal loop)
+                continue
+
+            # --- Logica di Scrittura del Frame ---
+            # Se l'oggetto non è None, allora è un frame da scrivere.
+            # Scriviamo solo se uno dei writer è effettivamente attivo.
+            if out or ffmpeg_proc:
+                try:
+                    if ffmpeg_proc:
+                        ffmpeg_proc.stdin.write(item.tobytes())
+                    elif out:
+                        out.write(item)
+                    # update_perf_counter("written") # Se vuoi ripristinare il contatore
+                except Exception as e:
+                    # Gestisce errori che potrebbero verificarsi durante la scrittura
+                    logging.error(f"[WRITE] Errore imprevisto durante la scrittura del frame: {e}")
+                    # In caso di errore grave, è meglio resettare lo stato di registrazione
+                    # per evitare un ciclo di errori.
+                    recording_event.clear()
+        except queue.Empty:
+            # È normale che la coda sia vuota, continua semplicemente ad attendere.
+            continue
+        
+    logging.info("[WRITER] Thread di scrittura terminato.")
 
 def snapshot_writer_thread(state_event):
     # Gestisce la scrittura degli snapshot su disco.
@@ -421,12 +443,18 @@ def timelapse_capture_thread(state_event):
             last_capture_time = time.time()
             try:
                 logging.info("[TIMELAPSE] Cattura di un'immagine a lunga esposizione...")
-                captured_frame = picam2.capture_array()
+                request = picam2.capture_request()
+
+                # Let Picamera2 build the proper NumPy array from the request
+                captured_image = request.make_array('main')
+                
+                # It's good practice to release the request to free up memory buffers
+                request.release()
                 
                 if args.timelapse_color:
-                    final_frame = captured_frame
+                    final_frame = cv2.cvtColor(captured_image, cv2.COLOR_RGB2BGR)
                 else:
-                    final_frame = captured_frame[:height, :width]
+                    final_frame = cv2.cvtColor(captured_image, cv2.COLOR_YUV2GRAY_I420)
                 
                 timelapse_writer_queue.put(final_frame)
                 logging.info("[TIMELAPSE] Immagine catturata e inviata per il salvataggio.")
@@ -488,26 +516,33 @@ if __name__ == "__main__":
                     logging.info("[MANAGER] Riconfigurazione della camera per METEOR_FINDER...")
                     lores_w = width // args.downscale_factor
                     lores_h = height // args.downscale_factor
+                    
+                    # Costruisce i controlli di base
+                    meteor_controls = {"FrameDurationLimits": METEOR_EXPOSURE_LIMITS, "AnalogueGain": args.gain}
+                    
+                    # Aggiunge il controllo del framerate solo se la modalità è 'fixed'
+                    if args.framerate_mode == 'fixed':
+                        meteor_controls["FrameRate"] = args.framerate
+                        
                     video_config = picam2.create_video_configuration(
                         main={"size": (width, height), "format": "Y"},
                         lores={"size": (lores_w, lores_h), "format": "Y"},
-                        controls={"FrameDurationLimits": METEOR_EXPOSURE_LIMITS, "AnalogueGain": args.gain, "FrameRate": FRAME_RATE}
+                        controls=meteor_controls
                     )
                     picam2.configure(video_config)
                     picam2.start()
+
                     if args.framerate_mode == 'dynamic':
-                        # In modalità dinamica, interroga i metadati della camera per scoprire il framerate reale
                         metadata = picam2.capture_metadata()
-                        FRAME_RATE = metadata["FrameRate"]
-                        logging.info(f"[CAMERA] Framerate dinamico rilevato: {FRAME_RATE:.2f} fps")
-                    else:
-                        # In modalità fissa, usa il valore specificato dall'utente
-                        FRAME_RATE = args.framerate
-                        logging.info(f"[CAMERA] Framerate fisso impostato a: {FRAME_RATE} fps")
-                        
+                        effective_framerate = metadata["FrameRate"]
+                        logging.info(f"[CAMERA] Framerate dinamico rilevato: {effective_framerate:.2f} fps")
+                    else: # 'fixed'
+                        effective_framerate = args.framerate
+                        logging.info(f"[CAMERA] Framerate fisso impostato a: {effective_framerate} fps")
+
                     active_threads = [
                         threading.Thread(target=capture_thread_meteor, args=(state_events['meteor_finder'],), daemon=True),
-                        threading.Thread(target=processing_thread, args=(state_events['meteor_finder'],), daemon=True),
+                        threading.Thread(target=processing_thread, args=(state_events['meteor_finder'], effective_framerate), daemon=True),
                         threading.Thread(target=writer_thread, args=(state_events['meteor_finder'],), daemon=True),
                         threading.Thread(target=snapshot_writer_thread, args=(state_events['meteor_finder'],), daemon=True)
                     ]
