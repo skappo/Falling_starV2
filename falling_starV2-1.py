@@ -68,7 +68,7 @@ def save_config(args):
         print(f"[CONFIG] Configurazione aggiornata e salvata in {CONFIG_FILE}")
     except Exception as e:
         print(f"[ERROR] Could not save config to {CONFIG_FILE}: {e}")
-         
+
 # === ARGOMENTI CLI E CONFIGURAZIONE CENTRALE ===
 parser = argparse.ArgumentParser(description="Rilevamento eventi luminosi e timelapse con Picamera2", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
@@ -227,7 +227,7 @@ def create_timelapse_video(image_folder, output_filename, fps, cleanup=False):
     Crea un video MP4 da una sequenza di immagini JPG usando ffmpeg.
     """
     logging.info(f"[POST-PROCESSING] Avvio creazione video timelapse da {image_folder}")
-    
+
     # Trova e ordina tutte le immagini JPG nella cartella
     images = sorted([img for img in os.listdir(image_folder) if img.endswith(".jpg")])
     if not images:
@@ -308,19 +308,19 @@ width, height = RESOLUTIONS[args.size]
 
 # === SUPPORTO H264 PER RASPBERRY PI ===
 def start_ffmpeg_writer(filename, width, height, framerate):
-    # Avvia un processo ffmpeg che accetta dati raw in grayscale e li codifica in H.264 su un raspberry utilizzando h264_v4l2m2m. 
+    # Avvia un processo ffmpeg che accetta dati raw in grayscale e li codifica in H.264 su un raspberry utilizzando h264_v4l2m2m.
     cmd = [
-        "ffmpeg", "-y", 
-        "-f", "rawvideo", 
+        "ffmpeg", "-y",
+        "-f", "rawvideo",
         "-pix_fmt", "gray",
         "-s", f"{width}x{height}",
-        "-r", str(framerate), 
-        "-i", "-", 
+        "-r", str(framerate),
+        "-i", "-",
         "-vf", "format=yuv420p",
         "-an",
         "-vcodec", "h264_v4l2m2m", # <-- USA L'ENCODER HARDWARE del Raspberry Pi
-        "-preset", "ultrafast", 
-        "-crf", "23", 
+        "-preset", "ultrafast",
+        "-crf", "23",
         filename
     ]
     return subprocess.Popen(cmd, stdin=subprocess.PIPE)
@@ -343,7 +343,6 @@ else:
 # === CODE E VAR GLOBALI ===
 # --- Queues ---
 frame_queue = queue.Queue(maxsize=args.frame_queue_maxsize)
-stack_queue = queue.Queue(maxsize=5) # Piccola, solo per i frame da aggiungere
 output_queue = queue.Queue(maxsize=args.output_queue_maxsize)
 snapshot_queue = queue.Queue(maxsize=args.snapshot_queue_maxsize)
 timelapse_writer_queue = queue.Queue(maxsize=10)
@@ -384,7 +383,7 @@ def capture_thread_meteor(state_event, width, height):
     # Pre-calcola le dimensioni dello stream a bassa risoluzione per lo slicing
     lores_w = width // args.downscale_factor
     lores_h = height // args.downscale_factor
-    
+
     while running and state_event.is_set():
         request = None # Inizializza a None per sicurezza
         try:
@@ -395,7 +394,7 @@ def capture_thread_meteor(state_event, width, height):
             # 2. Estrae i dati in array NumPy garantiti.
             main_frame_yuv = request.make_array("main")
             lores_frame_yuv = request.make_array("lores")
-           
+
             # Converte in grayscale QUI, una sola volta.
             main_frame_gray = main_frame_yuv[:height, :width]
             lores_frame_gray = lores_frame_yuv[:lores_h, :lores_w]
@@ -429,7 +428,7 @@ def monitor_thread():
         if current_state == "IDLE":
             logging.info(f"[MONITOR] Stato @ {datetime.now().strftime('%H:%M:%S')}: IDLE. In attesa del prossimo task programmato.", extra={'state': 'IDLE'})
             continue
-        
+
         # Legge i valori correnti dei contatori globali in modo thread-safe
         with lock_perf:
             current_fc = frames_captured
@@ -442,7 +441,7 @@ def monitor_thread():
         fc_interval = current_fc - last_fc
         fp_interval = current_fp - last_fp
         fw_interval = current_fw - last_fw
-        
+
         # Aggiorna i valori "last" per il prossimo ciclo
         last_fc, last_fp, last_fw, last_ev = current_fc, current_fp, current_fw, current_ev
 
@@ -450,11 +449,11 @@ def monitor_thread():
         fps_cap = fc_interval / INTERVAL
         fps_proc = fp_interval / INTERVAL
         fps_write = fw_interval / INTERVAL
-        
+
         # --- Preparazione dell'Output ---
         status = "SÌ" if 'recording_event' in globals() and recording_event.is_set() else "NO"
         q_sizes = f"[{frame_queue.qsize()}/{output_queue.qsize()}/{snapshot_queue.qsize()}/{timelapse_writer_queue.qsize()}]"
-        
+
         # --- Color helpers ---
         def color_state(state):
             mapping = {
@@ -487,18 +486,18 @@ def monitor_thread():
         logging.info(f"  Stato -> Registrazione Attiva: {status}, Code [Meteora/Video/Snap/Timelapse]: "f"[{q_frame}/{q_out}/{q_snap}/{q_tl}]")
 
 # --- Meteor Finder Threads ---
-def processing_thread(state_event, effective_framerate, pre_event_buffer, width, height): 
+def processing_thread(state_event, effective_framerate, pre_event_buffer, width, height):
     """
     Preleva i frame, esegue il rilevamento e gestisce la registrazione in modo
     robusto e thread-safe.
     """
     global reference_frame, last_event_time, out, ffmpeg_proc, record_start_time
-    
+
     scaled_trigger_area = args.trigger_area / (args.downscale_factor**2)
     is_shutting_down = False
-    
+
     while running and state_event.is_set():
-        
+
         # --- Blocco di Arresto Prioritario ---
         # Questo blocco ha la priorità su tutto il resto. Se dobbiamo arrestare una
         # registrazione, ci concentriamo solo su quello.
@@ -506,16 +505,16 @@ def processing_thread(state_event, effective_framerate, pre_event_buffer, width,
             try:
                 output_queue.put(None, block=False) # Invia il segnale di stop
                 logging.info("[PROCESS] Segnale di stop inviato con successo al writer.")
-                
+
                 # Resetta lo stato solo DOPO aver inviato il segnale con successo
                 is_shutting_down = False
                 pre_event_buffer.clear()
                 recording_event.clear()
-                
+
             except queue.Full:
                 # La coda è ancora piena, il writer è indietro. Aspettiamo e riproviamo.
                 time.sleep(0.5)
-            
+
             # Torna all'inizio del loop per riprovare a inviare il segnale
             # o per uscire se lo stato del thread è cambiato.
             continue
@@ -529,7 +528,7 @@ def processing_thread(state_event, effective_framerate, pre_event_buffer, width,
             # È normale che la coda sia vuota, facciamo una breve pausa.
             time.sleep(0.01)
             continue
-        
+
         # --- Logica di Rilevamento ---
         # Lavora sempre su frame in scala di grigi.
         blurred = cv2.medianBlur(detection_frame, 3)
@@ -558,17 +557,17 @@ def processing_thread(state_event, effective_framerate, pre_event_buffer, width,
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = os.path.join(args.output_dir, f"evento_{timestamp}.{extension}")
             snapshot_path = os.path.join(args.output_dir, f"snapshot_{timestamp}.jpg")
-            
+
             try:
                 snapshot_queue.put((snapshot_path, full_res_frame.copy()), block=False)
             except queue.Full:
-                logging.warning("[PROCESS] Coda snapshot piena, snapshot scartato.")            
-            
+                logging.warning("[PROCESS] Coda snapshot piena, snapshot scartato.")
+
             if args.codec == "h264":
                 ffmpeg_proc = start_ffmpeg_writer(filename, width, height, effective_framerate)
             else:
                 out = cv2.VideoWriter(filename, fourcc, effective_framerate, (width, height), isColor=False)
-            
+
             for f in pre_event_buffer:
                 try:
                     output_queue.put(f, timeout=0.1)
@@ -617,7 +616,7 @@ def writer_thread(state_event):
             # Controlla se l'oggetto ricevuto è il segnale di "Fine Stream".
             if item is None:
                 logging.info("[WRITE] Segnale di stop ricevuto. Finalizzazione del video in corso...")
-                
+
                 # Chiude in modo sicuro il processo ffmpeg, se attivo
                 if ffmpeg_proc:
                     if ffmpeg_proc.stdin:
@@ -629,14 +628,14 @@ def writer_thread(state_event):
                             pass
                     ffmpeg_proc.wait() # Attende che il processo ffmpeg termini completamente
                     ffmpeg_proc = None # Resetta la variabile globale
-                
+
                 # Chiude in modo sicuro l'oggetto VideoWriter di OpenCV, se attivo
                 if out:
                     out.release()
                     out = None # Resetta la variabile globale
-                
+
                 logging.info("[WRITE] Video finalizzato e chiuso correttamente.")
-                
+
                 # Continua al prossimo ciclo per attendere un nuovo task (non esce dal loop)
                 continue
 
@@ -672,7 +671,7 @@ def writer_thread(state_event):
             # È normale che la coda sia vuota, continua semplicemente ad attendere.
             time.sleep(0.01)
             continue
-        
+
     logging.info("[WRITER] Thread di scrittura terminato.")
 
 def snapshot_writer_thread(state_event):
@@ -691,7 +690,7 @@ def snapshot_writer_thread(state_event):
             logging.error(f"[SNAPSHOT] Errore nel salvataggio snapshot: {e}")
 
 # --- Timelapse Threads ---
-def timelapse_capture_thread(state_event, width, height):
+def timelapse_capture_thread(state_event):
     """Cattura scatti a lunga esposizione a intervalli regolari."""
     logging.info("[TIMELAPSE] Thread di cattura avviato.")
     last_capture_time = time.time() - args.timelapse_interval # Per scattare subito la prima foto
@@ -699,34 +698,37 @@ def timelapse_capture_thread(state_event, width, height):
     while running and state_event.is_set():
         if time.time() - last_capture_time >= args.timelapse_interval:
             last_capture_time = time.time()
-#            request = None
+            request = None # Inizializza per il blocco finally
             try:
+                logging.info(f"[TIMELAPSE] Avvio cattura (esposizione: {args.timelapse_exposure}s)...")
+                # Avvia la cattura e ottieni un "job" che può essere atteso.
+                job = picam2.capture_request()
+
                 wait_timeout = args.timelapse_exposure + 5
                 logging.info(f"[TIMELAPSE] In attesa del completamento del job (timeout: {wait_timeout}s)...")
 
-                # picam2.wait() attende il completamento di un job e restituisce la richiesta completata.
-                request = picam2.wait(job, timeout=wait_timeout * 1000) # timeout è in millisecondi
+                # Attendi il completamento del job.
+                request = picam2.wait(job, timeout=wait_timeout * 1000)
 
                 if request is None:
                     raise RuntimeError("La richiesta di cattura del timelapse è scaduta (il job non è stato completato in tempo).")
-                    
-                # Let Picamera2 build the proper NumPy array from the request
+
                 captured_image = request.make_array('main')
-                
+
                 if args.timelapse_color:
                     final_frame = cv2.cvtColor(captured_image, cv2.COLOR_RGB2BGR)
                 else:
                     final_frame = cv2.cvtColor(captured_image, cv2.COLOR_YUV2GRAY_I420)
-                
+
                 timelapse_writer_queue.put(final_frame)
                 logging.info("[TIMELAPSE] Immagine catturata e inviata per il salvataggio.")
             except Exception as e:
                 logging.error(f"[TIMELAPSE] Errore durante la cattura: {e}")
             finally:
-                # This block will ALWAYS execute
-                if 'request' in locals() and request:
+                # Rilascia sempre la richiesta per liberare il buffer della camera.
+                if request:
                     request.release()
-                    
+
         time.sleep(1) # Breve pausa per ridurre il carico della CPU
     logging.info("[TIMELAPSE] Thread di cattura terminato.")
 
@@ -735,7 +737,7 @@ def timelapse_writer_thread(state_event):
     timelapse_dir = os.path.join(args.output_dir, "timelapse")
     os.makedirs(timelapse_dir, exist_ok=True)
     logging.info(f"[TIMELAPSE] Thread di scrittura avviato. Salvataggio in: {timelapse_dir}")
-    
+
     while running and state_event.is_set():
         try:
             frame = timelapse_writer_queue.get_nowait()
@@ -752,9 +754,9 @@ def timelapse_writer_thread(state_event):
 if __name__ == "__main__":
     active_threads = []
     state_events = {'meteor_finder': threading.Event(), 'timelapse': threading.Event()}
-    
+
     width, height = RESOLUTIONS[args.size]
-    
+
     # --- Shutdown Time Setup ---
     shutdown_time_obj = None
     if args.shutdown_time:
@@ -763,7 +765,7 @@ if __name__ == "__main__":
             logging.info(f"[MANAGER] Spegnimento del sistema programmato per le {args.shutdown_time}")
         except ValueError:
             logging.error(f"[MANAGER] Formato dell'orario di spegnimento non valido: {args.shutdown_time}. La funzione è disabilitata.")
-    
+
     shutdown_initiated = False
     shutdown_for_system = False
 
@@ -771,7 +773,7 @@ if __name__ == "__main__":
     logging.info("[MAIN] Avvio dei thread universali (Monitor)...")
     monitor_t = threading.Thread(target=monitor_thread, daemon=True, name="Monitor")
     monitor_t.start()
-    
+
     try:
         while running:
             # 1. Determina lo stato desiderato in base alla pianificazione
@@ -796,7 +798,7 @@ if __name__ == "__main__":
 
                     # 1. Signal all threads in the current mode to stop their loops.
                     state_events[current_state.lower()].clear()
-                    
+
                     # 2. Wait for them to finish gracefully.
                     #    The writer thread will finish its current file thanks to the sentinel.
                     for t in active_threads:
@@ -806,29 +808,29 @@ if __name__ == "__main__":
                     alive_threads = [t for t in active_threads if t.is_alive()]
                     if alive_threads:
                         logging.warning(f"[MANAGER] I seguenti thread non sono terminati: {[t.name for t in alive_threads]}")
-                    
+
                     active_threads.clear()
-                    
+
                     # 4. Only stop the camera after all threads that use it are confirmed down.
-                    if picam2.started:                        
+                    if picam2.started:
                         picam2.stop()
-                        
+
                     logging.info(f"[MANAGER] Modalità {current_state} arrestata.")
-                
+
                 # --- Fase di STARTUP ---
                 current_state = desired_state
                 if current_state == "METEOR_FINDER":
                     logging.info("[MANAGER] Riconfigurazione della camera per METEOR_FINDER...")
                     lores_w = width // args.downscale_factor
                     lores_h = height // args.downscale_factor
-                    
+
                     # Costruisce i controlli di base
                     meteor_controls = {"FrameDurationLimits": METEOR_EXPOSURE_LIMITS, "AnalogueGain": args.gain}
-                    
+
                     # Aggiunge il controllo del framerate solo se la modalità è 'fixed'
                     if args.framerate_mode == 'fixed':
                         meteor_controls["FrameRate"] = args.framerate
-                        
+
                     video_config = picam2.create_video_configuration(
                         main={"size": (width, height), "format": "YUV420"},
                         lores={"size": (lores_w, lores_h), "format": "YUV420"},
@@ -845,18 +847,18 @@ if __name__ == "__main__":
                         effective_framerate = args.framerate
                         logging.info(f"[CAMERA] Framerate fisso impostato a: {effective_framerate} fps")
 
-                    logging.info(f"[MANAGER] Creazione del pre-event buffer per {args.pre_event_seconds} secondi ({int(args.pre_event_seconds * effective_framerate)} frames).")                   
+                    logging.info(f"[MANAGER] Creazione del pre-event buffer per {args.pre_event_seconds} secondi ({int(args.pre_event_seconds * effective_framerate)} frames).")
                     pre_event_buffer = deque(maxlen=int(args.pre_event_seconds * effective_framerate))
 
                     active_threads = [
                         threading.Thread(target=capture_thread_meteor, args=(state_events['meteor_finder'], width, height), daemon=True, name="MeteorCapture"),
                         threading.Thread(target=processing_thread, args=(state_events['meteor_finder'], effective_framerate, pre_event_buffer, width, height), daemon=True, name="MeteorProcess"),
                         threading.Thread(target=writer_thread, args=(state_events['meteor_finder'],), daemon=True, name="MeteorWriter"),
-                        threading.Thread(target=snapshot_writer_thread, args=(state_events['meteor_finder'],), daemon=True, name="MeteorSnapshot")                    
+                        threading.Thread(target=snapshot_writer_thread, args=(state_events['meteor_finder'],), daemon=True, name="MeteorSnapshot")
                     ]
                     state_events['meteor_finder'].set()
                     for t in active_threads: t.start()
-                
+
                 elif current_state == "TIMELAPSE":
                     logging.info("[MANAGER] Riconfigurazione della camera per TIMELAPSE...")
                     capture_format = "RGB888" if args.timelapse_color else "YUV420"
@@ -868,33 +870,33 @@ if __name__ == "__main__":
                     if HAS_AUTOFOCUS:
                         timelapse_controls["AfMode"] = controls.AfModeEnum.Manual
                         timelapse_controls["LensPosition"] = 0.0
-                    
+
                     still_config = picam2.create_still_configuration(main={"size": (width, height), "format": capture_format}, controls=timelapse_controls)
                     picam2.configure(still_config)
                     picam2.start()
                     active_threads = [
-                        threading.Thread(target=timelapse_capture_thread, args=(state_events['timelapse'], width, height), daemon=True, name="TimelapseCapture"),
+                        threading.Thread(target=timelapse_capture_thread, args=(state_events['timelapse'],), daemon=True, name="TimelapseCapture"),
                         threading.Thread(target=timelapse_writer_thread, args=(state_events['timelapse'],), daemon=True, name="TimelapseWriter")
                     ]
                     state_events['timelapse'].set()
                     for t in active_threads: t.start()
-                
+
                 elif current_state == "POST_PROCESSING":
                     logging.info("[MANAGER] Ingresso in modalità POST_PROCESSING per la creazione del video timelapse.")
                     timelapse_dir = os.path.join(args.output_dir, "timelapse")
                     video_filename = os.path.join(args.output_dir, f"timelapse_{datetime.now().strftime('%Y%m%d')}.mp4")
-                    
+
                     # Esegui la funzione di creazione video
                     create_timelapse_video(
                         image_folder=timelapse_dir,
                         output_filename=video_filename,
                         fps=args.timelapse_video_fps,
                         cleanup=args.timelapse_cleanup_images
-                    )                
+                    )
                     # Dopo il post-processing, lo stato naturale successivo è IDLE
-                    current_state = "IDLE" 
-                    logging.info("[MANAGER] Post-processing completato. Ritorno in modalità IDLE.")               
-                
+                    current_state = "IDLE"
+                    logging.info("[MANAGER] Post-processing completato. Ritorno in modalità IDLE.")
+
                 elif current_state == "IDLE":
                     logging.info("[MANAGER] Ingresso in modalità IDLE.")
 
@@ -904,8 +906,8 @@ if __name__ == "__main__":
                     logging.info(f"[MANAGER] Orario di spegnimento ({args.shutdown_time}) raggiunto. Avvio della terminazione.", extra={'state': 'SHUTDOWN'})
                     shutdown_initiated = True  # Assicura che questo blocco venga eseguito una sola volta
                     shutdown_for_system = True # Flag per eseguire il comando di spegnimento dopo la pulizia
-                    running = False            # Avvia la terminazione pulita dello script             
-            
+                    running = False            # Avvia la terminazione pulita dello script
+
             time.sleep(30) # Intervallo di controllo dello scheduler
 
     except KeyboardInterrupt:
@@ -913,7 +915,7 @@ if __name__ == "__main__":
     finally:
         running = False
         for event in state_events.values(): event.clear()
-        
+
         # Ensure any final video is saved
         if 'recording_event' in globals() and recording_event.is_set():
             logging.info("[MAIN] Finalizzazione della registrazione in corso...")
@@ -921,9 +923,9 @@ if __name__ == "__main__":
 
         all_threads = [monitor_t] + active_threads
         for t in all_threads: t.join(timeout=5)
-        
+
         if picam2.started: picam2.stop()
-        
+
         # This final check is belt-and-suspenders, but safe
         if out: out.release()
         if ffmpeg_proc:
@@ -931,7 +933,7 @@ if __name__ == "__main__":
                 try: ffmpeg_proc.stdin.close()
                 except BrokenPipeError: pass
             ffmpeg_proc.wait()
-        
+
         logging.info("[MAIN] Uscita completata.")
 
     # --- Fase di Spegnimento del Sistema ---
@@ -942,9 +944,9 @@ if __name__ == "__main__":
         logging.info(f"[SHUTDOWN] Spegnimento del sistema programmato per le {args.shutdown_time} in corso...", extra={'state': 'SHUTDOWN'})
         logging.info("**************************************************", extra={'state': 'SHUTDOWN'})
         # Svuota i buffer del sistema operativo per assicurarsi che i log siano scritti su disco
-        os.sync() 
+        os.sync()
         time.sleep(2) # Breve attesa per sicurezza
-        
+
         # Esegui il comando di spegnimento
         # NOTA: Lo script deve essere eseguito con `sudo` affinché questo comando funzioni.
         os.system("sudo shutdown now")
