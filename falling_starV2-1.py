@@ -1,4 +1,3 @@
-import argparse
 import cv2
 import numpy as np
 import time
@@ -75,7 +74,7 @@ def save_config(config_dict):
         print(f"{Fore.GREEN}[CONFIG] Configurazione salvata con successo in {CONFIG_FILE}{Style.RESET_ALL}")
     except Exception as e:
         print(f"{Fore.RED}[ERROR] Impossibile salvare la configurazione in {CONFIG_FILE}: {e}{Style.RESET_ALL}")
-        
+
 # === EDITOR INTERATTIVO DELLA CONFIGURAZIONE (Now the main entry point) ===
 def edit_config_interactive(current_config):
     """
@@ -85,7 +84,7 @@ def edit_config_interactive(current_config):
     cfg = current_config.copy()
     while True:
         print("\n" + "="*15 + " MENU CONFIGURAZIONE " + "="*15)
-        
+
         # Stampa i parametri in modo leggibile
         keys = list(cfg.keys())
         for i, key in enumerate(keys, start=1):
@@ -105,7 +104,7 @@ def edit_config_interactive(current_config):
 
         if not choice.strip():
             return None # L'utente ha scelto di uscire
-        
+
         if choice == "0":
             print("[INFO] Salvataggio della configurazione finale...")
             save_config(cfg)
@@ -134,7 +133,7 @@ def edit_config_interactive(current_config):
                     else: new_val = new_val_str
                 else: # Altrimenti, mantieni come stringa
                     new_val = new_val_str
-                
+
                 cfg[key_to_edit] = new_val
                 print(f"{Fore.GREEN}[OK] Valore aggiornato: {key_to_edit} = {new_val}{Style.RESET_ALL}")
 
@@ -142,7 +141,7 @@ def edit_config_interactive(current_config):
                 print(f"{Fore.RED}[ERRORE] Input non valido. Il tipo non è stato modificato.{Style.RESET_ALL}")
         else:
             print(f"{Fore.RED}[ERRORE] Scelta non valida.{Style.RESET_ALL}")
-         
+
 # === LOGGING CLASS (Defined in Global Scope) ===
 class ColoredFormatter(logging.Formatter):
     """Formatter personalizzato che colora i log in base allo stato o al livello."""
@@ -159,7 +158,7 @@ class ColoredFormatter(logging.Formatter):
 def create_timelapse_video(image_folder, output_filename, fps, cleanup=False):
     # Utilizza ffmpeg per creare un video da una sequenza di immagini.
     logging.info(f"[POST-PROCESSING] Avvio creazione video timelapse da {image_folder}")
-    
+
     # Trova e ordina tutte le immagini JPG nella cartella
     images = sorted([img for img in os.listdir(image_folder) if img.endswith(".jpg")])
     if not images:
@@ -242,17 +241,17 @@ def start_ffmpeg_writer(filename, width, height, framerate):
       dall'encoder hardware `h264_v4l2m2m`.
     """
     cmd = [
-        "ffmpeg", "-y", 
-        "-f", "rawvideo", 
+        "ffmpeg", "-y",
+        "-f", "rawvideo",
         "-pix_fmt", "gray",
         "-s", f"{width}x{height}",
-        "-r", str(framerate), 
-        "-i", "-", 
+        "-r", str(framerate),
+        "-i", "-",
         "-vf", "format=yuv420p",
         "-an",
         "-vcodec", "h264_v4l2m2m", # <-- USA L'ENCODER HARDWARE del Raspberry Pi
-        "-preset", "ultrafast", 
-        "-crf", "23", 
+        "-preset", "ultrafast",
+        "-crf", "23",
         filename
     ]
     return subprocess.Popen(cmd, stdin=subprocess.PIPE)
@@ -280,7 +279,7 @@ def capture_thread_meteor(state_event, width, height):
     # Pre-calcola le dimensioni dello stream a bassa risoluzione per lo slicing
     lores_w = width // APP_CONFIG['downscale_factor']
     lores_h = height // APP_CONFIG['downscale_factor']
-    
+
     while running and state_event.is_set():
         request = None # Inizializza a None per sicurezza
         try:
@@ -291,7 +290,7 @@ def capture_thread_meteor(state_event, width, height):
             # 2. Estrae i dati in array NumPy garantiti.
             main_frame_yuv = request.make_array("main")
             lores_frame_yuv = request.make_array("lores")
-           
+
             # Converte in grayscale QUI, una sola volta.
             main_frame_gray = main_frame_yuv[:height, :width]
             lores_frame_gray = lores_frame_yuv[:lores_h, :lores_w]
@@ -317,7 +316,7 @@ def monitor_thread():
     - In modalità IDLE, stampa un messaggio semplificato.
     - Calcola i totali di sessione (persistenti) e i tassi attuali (FPS).
     """
-    global frames_captured, frames_processed, frames_written, events_triggered, lock_perf
+    global frames_captured, frames_processed, frames_written, events_triggered, lock_perf, state_lock, current_state
     INTERVAL = 15 # Aumentiamo l'intervallo per rendere i totali più significativi
 
     # Variabili per calcolare i tassi (FPS) tra un intervallo e l'altro
@@ -326,11 +325,14 @@ def monitor_thread():
     while running:
         time.sleep(INTERVAL)
 
+        with state_lock:
+            local_state = current_state
+
         # Se lo script è inattivo, non stampare nulla e attendi il prossimo ciclo.
-        if current_state == "IDLE":
+        if local_state == "IDLE":
             logging.info(f"[MONITOR] Stato @ {datetime.now().strftime('%H:%M:%S')}: IDLE. In attesa del prossimo task programmato.", extra={'state': 'IDLE'})
             continue
-        
+
         # Legge i valori correnti dei contatori globali in modo thread-safe
         with lock_perf:
             current_fc = frames_captured
@@ -343,7 +345,7 @@ def monitor_thread():
         fc_interval = current_fc - last_fc
         fp_interval = current_fp - last_fp
         fw_interval = current_fw - last_fw
-        
+
         # Aggiorna i valori "last" per il prossimo ciclo
         last_fc, last_fp, last_fw, last_ev = current_fc, current_fp, current_fw, current_ev
 
@@ -351,11 +353,11 @@ def monitor_thread():
         fps_cap = fc_interval / INTERVAL
         fps_proc = fp_interval / INTERVAL
         fps_write = fw_interval / INTERVAL
-        
+
         # --- Preparazione dell'Output ---
         status = "SÌ" if 'recording_event' in globals() and recording_event.is_set() else "NO"
         q_sizes = f"[{frame_queue.qsize()}/{output_queue.qsize()}/{snapshot_queue.qsize()}/{timelapse_writer_queue.qsize()}]"
-        
+
         # --- Color helpers ---
         def color_state(state):
             mapping = {
@@ -379,7 +381,7 @@ def monitor_thread():
         q_tl = color_queue(timelapse_writer_queue.qsize(), 10)
 
         # --- Output (same structure as before, but with colors) ---
-        logging.info(f"[MONITOR] Stato @ {datetime.now().strftime('%H:%M:%S')}: {color_state(current_state)}")
+        logging.info(f"[MONITOR] Stato @ {datetime.now().strftime('%H:%M:%S')}: {color_state(local_state)}")
         # Stampa i totali incrementali
         logging.info(f"  Totali Sessione -> Frame Acquisiti: {current_fc} | Frame Processati: {current_fp} | Frame Scritti: {current_fw}")
         logging.info(f"  Totali Sessione -> Eventi/Scatti Rilevati: {current_ev}")
@@ -388,7 +390,7 @@ def monitor_thread():
         logging.info(f"  Stato -> Registrazione Attiva: {status}, Code [Meteora/Video/Snap/Timelapse]: "f"[{q_frame}/{q_out}/{q_snap}/{q_tl}]")
 
 # --- Meteor Finder Threads ---
-def processing_thread(state_event, effective_framerate, pre_event_buffer, width, height): 
+def processing_thread(state_event, effective_framerate, pre_event_buffer, width, height):
     """
     THREAD CRITICO: Il "cervello" della modalità METEOR_FINDER.
     - Consumatore della `frame_queue`.
@@ -399,12 +401,12 @@ def processing_thread(state_event, effective_framerate, pre_event_buffer, width,
       per garantire l'invio affidabile del segnale di stop (`None`) al writer.
     """
     global reference_frame, last_event_time, out, ffmpeg_proc, record_start_time
-    
+
     scaled_trigger_area = APP_CONFIG['trigger_area'] / (APP_CONFIG['downscale_factor']**2)
     is_shutting_down = False
-    
+
     while running and state_event.is_set():
-        
+
         # --- Blocco di Arresto Prioritario ---
         # Questo blocco ha la priorità su tutto il resto. Se dobbiamo arrestare una
         # registrazione, ci concentriamo solo su quello.
@@ -412,16 +414,16 @@ def processing_thread(state_event, effective_framerate, pre_event_buffer, width,
             try:
                 output_queue.put(None, block=False) # Invia il segnale di stop
                 logging.info("[PROCESS] Segnale di stop inviato con successo al writer.")
-                
+
                 # Resetta lo stato solo DOPO aver inviato il segnale con successo
                 is_shutting_down = False
                 pre_event_buffer.clear()
                 recording_event.clear()
-                
+
             except queue.Full:
                 # La coda è ancora piena, il writer è indietro. Aspettiamo e riproviamo.
                 time.sleep(0.5)
-            
+
             # Torna all'inizio del loop per riprovare a inviare il segnale
             # o per uscire se lo stato del thread è cambiato.
             continue
@@ -435,7 +437,7 @@ def processing_thread(state_event, effective_framerate, pre_event_buffer, width,
             # È normale che la coda sia vuota, facciamo una breve pausa.
             time.sleep(0.01)
             continue
-        
+
         # --- Logica di Rilevamento ---
         # Lavora sempre su frame in scala di grigi.
         blurred = cv2.medianBlur(detection_frame, 3)
@@ -464,17 +466,17 @@ def processing_thread(state_event, effective_framerate, pre_event_buffer, width,
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = os.path.join(APP_CONFIG['output_dir'], f"evento_{timestamp}.{extension}")
             snapshot_path = os.path.join(APP_CONFIG['output_dir'], f"snapshot_{timestamp}.jpg")
-            
+
             try:
                 snapshot_queue.put((snapshot_path, full_res_frame.copy()), block=False)
             except queue.Full:
-                logging.warning("[PROCESS] Coda snapshot piena, snapshot scartato.")            
-            
+                logging.warning("[PROCESS] Coda snapshot piena, snapshot scartato.")
+
             if APP_CONFIG['codec'] == "h264":
                 ffmpeg_proc = start_ffmpeg_writer(filename, width, height, effective_framerate)
             else:
                 out = cv2.VideoWriter(filename, fourcc, effective_framerate, (width, height), isColor=False)
-            
+
             for f in pre_event_buffer:
                 try:
                     output_queue.put(f, timeout=0.1)
@@ -530,7 +532,7 @@ def writer_thread(state_event):
             # Controlla se l'oggetto ricevuto è il segnale di "Fine Stream".
             if item is None:
                 logging.info("[WRITE] Segnale di stop ricevuto. Finalizzazione del video in corso...")
-                
+
                 # Chiude in modo sicuro il processo ffmpeg, se attivo
                 if ffmpeg_proc:
                     if ffmpeg_proc.stdin:
@@ -542,14 +544,14 @@ def writer_thread(state_event):
                             pass
                     ffmpeg_proc.wait() # Attende che il processo ffmpeg termini completamente
                     ffmpeg_proc = None # Resetta la variabile globale
-                
+
                 # Chiude in modo sicuro l'oggetto VideoWriter di OpenCV, se attivo
                 if out:
                     out.release()
                     out = None # Resetta la variabile globale
-                
+
                 logging.info("[WRITE] Video finalizzato e chiuso correttamente.")
-                
+
                 # Continua al prossimo ciclo per attendere un nuovo task (non esce dal loop)
                 continue
 
@@ -585,7 +587,7 @@ def writer_thread(state_event):
             # È normale che la coda sia vuota, continua semplicemente ad attendere.
             time.sleep(0.01)
             continue
-        
+
     logging.info("[WRITER] Thread di scrittura terminato.")
 
 def snapshot_writer_thread(state_event):
@@ -610,7 +612,6 @@ def timelapse_capture_thread(state_event):
     con un timeout personalizzato per gestire in modo robusto esposizioni lunghe.
     """
     logging.info("[TIMELAPSE] Thread di cattura avviato.")
-#    last_capture_time = time.time() - APP_CONFIG['timelapse_interval'] # Per scattare subito la prima foto
 
     # Determina la modalità di cattura
     is_manual_exposure = APP_CONFIG['timelapse_exposure'].lower() != "automatic"
@@ -620,15 +621,14 @@ def timelapse_capture_thread(state_event):
             manual_exposure_time = int(APP_CONFIG['timelapse_exposure'])
         except ValueError:
             logging.error(f"[TIMELAPSE] Valore di esposizione manuale non valido: '{APP_CONFIG['timelapse_exposure']}'. Arresto del thread.")
-            return    
-    
+            return
+
     while running and state_event.is_set():
-#        if time.time() - last_capture_time >= args.timelapse_interval:
-#            last_capture_time = time.time()
-        request = None # Inizializza per il blocco finally
+        capture_start_time = time.time()
+        request = None  # Inizializza per il blocco finally
         try:
             if is_manual_exposure:
-                 # --- Flusso per Esposizione Lunga e Manuale ---
+                # --- Flusso per Esposizione Lunga e Manuale ---
                 logging.info(f"[TIMELAPSE] Avvio cattura manuale (esposizione: {manual_exposure_time}s)...")
                 job = picam2.capture_request(wait=False)
                 wait_timeout = manual_exposure_time + 5
@@ -637,15 +637,15 @@ def timelapse_capture_thread(state_event):
             else:
                 # --- Flusso per Esposizione Automatica ---
                 logging.info(f"[TIMELAPSE] Avvio cattura automatica...")
-                request = picam2.capture_request() # Semplice chiamata bloccante
-                
+                request = picam2.capture_request()  # Semplice chiamata bloccante
+
             captured_image = request.make_array('main')
-                
+
             if APP_CONFIG['timelapse_color']:
                 final_frame = cv2.cvtColor(captured_image, cv2.COLOR_RGB2BGR)
             else:
                 final_frame = cv2.cvtColor(captured_image, cv2.COLOR_YUV2GRAY_I420)
-                
+
             timelapse_writer_queue.put(final_frame)
             logging.info("[TIMELAPSE] Immagine catturata e inviata per il salvataggio.")
 
@@ -655,14 +655,23 @@ def timelapse_capture_thread(state_event):
             if request:
                 request.release()
 
-        # Dopo che tutto è finito (sia in caso di successo che di errore), 
-        # attendi per l'intervallo specificato dall'utente.
-        logging.info(f"[TIMELAPSE] Inizio intervallo di attesa di {APP_CONFIG['timelapse_interval']} secondi...")
+        # --- Logica di attesa corretta ---
+        # Calcola il tempo trascorso e determina quanto tempo attendere per mantenere l'intervallo corretto.
+        capture_duration = time.time() - capture_start_time
+        wait_interval = max(0, APP_CONFIG['timelapse_interval'] - capture_duration)
+
+        logging.info(f"[TIMELAPSE] Cattura completata in {capture_duration:.2f}s. Inizio intervallo di attesa di {wait_interval:.2f} secondi...")
+
         # Usiamo un ciclo per controllare l'evento di stop più frequentemente (ogni secondo).
-        for _ in range(APP_CONFIG['timelapse_interval']):
+        # Questo ciclo gestisce la parte intera del tempo di attesa.
+        for _ in range(int(wait_interval)):
             if not (running and state_event.is_set()):
-                break # Interrompi l'attesa se lo script si sta fermando.
-            time.sleep(1)        
+                break  # Interrompi l'attesa se lo script si sta fermando.
+            time.sleep(1)
+
+        # Se non siamo stati interrotti, attendiamo per la parte frazionaria rimanente.
+        if running and state_event.is_set():
+            time.sleep(wait_interval % 1)
 
     logging.info("[TIMELAPSE] Thread di cattura terminato.")
 
@@ -671,7 +680,7 @@ def timelapse_writer_thread(state_event):
     timelapse_dir = os.path.join(APP_CONFIG['output_dir'], "timelapse")
     os.makedirs(timelapse_dir, exist_ok=True)
     logging.info(f"[TIMELAPSE] Thread di scrittura avviato. Salvataggio in: {timelapse_dir}")
-    
+
     while running and state_event.is_set():
         try:
             frame = timelapse_writer_queue.get_nowait()
@@ -691,7 +700,9 @@ def run_application():
     """
     global running, current_state, out, ffmpeg_proc, recording_event, reference_frame
     global last_event_time, record_start_time
-    global frames_captured, frames_processed, frames_written, events_triggered, lock_perf
+    global frames_captured, frames_processed, frames_written, events_triggered, lock_perf, state_lock
+    global picam2, frame_queue, output_queue, snapshot_queue, timelapse_writer_queue
+    global STRATEGY, RESOLUTIONS, METEOR_EXPOSURE_LIMITS, HAS_AUTOFOCUS, fourcc, extension
 
     # === LOGGING SETUP (Now safe to call) ===
     logger = logging.getLogger()
@@ -710,7 +721,7 @@ def run_application():
     # === PARAMETER SETUP ===
     STRATEGY = APP_CONFIG['strategy']
     RESOLUTIONS = {"small": (640, 480), "medium": (1280, 720), "large": (1920, 1080)}
-    METEOR_EXPOSURE_LIMITS = (50000, 1000000)        
+    METEOR_EXPOSURE_LIMITS = (50000, 1000000)
 
     # Code di comunicazione thread-safe tra i vari componenti.
     frame_queue = queue.Queue(maxsize=APP_CONFIG['frame_queue_maxsize'])
@@ -723,12 +734,11 @@ def run_application():
     picam2 = Picamera2()
     HAS_AUTOFOCUS = is_autofocus_camera(picam2)
     width, height = RESOLUTIONS[APP_CONFIG['size']]
-    
+
     # === CODEC ===
     # Determina l'estensione del file e il FourCC per i codec non-H264.
     if APP_CONFIG['codec'] == "avi":
-        # fourcc = cv2.VideoWriter_fourcc(*'IYUV') # Old
-        fourcc = cv2.VideoWriter_fourcc(*'XVID') # More compatible
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
         extension = "avi"
     elif APP_CONFIG['codec'] == "mjpeg":
         fourcc = cv2.VideoWriter_fourcc(*'MJPG')
@@ -737,25 +747,28 @@ def run_application():
         fourcc = None
         extension = "mp4"
     else:
-        raise ValueError("Codec non supportato.")    
-    
+        raise ValueError("Codec non supportato.")
+
     # === MAIN STATE MACHINE ===
     active_threads = []
     state_events = {'meteor_finder': threading.Event(), 'timelapse': threading.Event()}
- 
+
     # Initialize global variables for threads
     reference_frame = None
     recording_event = threading.Event()
     out, ffmpeg_proc = None, None
     running = True
-    current_state = "IDLE"
     last_event_time, record_start_time = 0, 0
     frames_captured, frames_processed, frames_written, events_triggered = 0, 0, 0, 0
     lock_perf = threading.Lock()
-    
+    state_lock = threading.Lock()
+
+    with state_lock:
+        current_state = "IDLE"
+
     monitor_t = threading.Thread(target=monitor_thread, daemon=True, name="Monitor")
     monitor_t.start()
- 
+
     shutdown_time_obj = None
     if APP_CONFIG['shutdown_time']:
         try:
@@ -763,12 +776,15 @@ def run_application():
             logging.info(f"[MANAGER] Spegnimento del sistema programmato per le {APP_CONFIG['shutdown_time']}")
         except (ValueError, TypeError):
             logging.error(f"[MANAGER] Formato orario di spegnimento non valido.")
-    
+
     shutdown_initiated = False
     shutdown_for_system = False
-    
+
     try:
         while running:
+            with state_lock:
+                local_state = current_state
+
             desired_state = "IDLE"
             is_meteor_time = is_time_in_interval(APP_CONFIG['meteor_start_time'], APP_CONFIG['meteor_end_time'])
             is_timelapse_time = is_time_in_interval(APP_CONFIG['timelapse_start_time'], APP_CONFIG['timelapse_end_time'])
@@ -776,14 +792,14 @@ def run_application():
                 desired_state = "METEOR_FINDER"
             elif is_timelapse_time:
                 desired_state = "TIMELAPSE"
-            elif current_state == "TIMELAPSE" and not is_timelapse_time and APP_CONFIG['timelapse_to_video']:
+            elif local_state == "TIMELAPSE" and not is_timelapse_time and APP_CONFIG['timelapse_to_video']:
                 desired_state = "POST_PROCESSING"
 
-            if desired_state != current_state:
-                logging.info(f"[MANAGER] Transizione di stato: {current_state} -> {desired_state}", extra={'state': desired_state})
-                if current_state != "IDLE":
-                    logging.info(f"[MANAGER] Arresto della modalità {current_state}...")
-                    state_events[current_state.lower()].clear()
+            if desired_state != local_state:
+                logging.info(f"[MANAGER] Transizione di stato: {local_state} -> {desired_state}", extra={'state': desired_state})
+                if local_state != "IDLE" and local_state != "POST_PROCESSING":
+                    logging.info(f"[MANAGER] Arresto della modalità {local_state}...")
+                    state_events[local_state.lower()].clear()
                     for t in active_threads: t.join(timeout=15)
                     alive_threads = [t for t in active_threads if t.is_alive()]
                     if alive_threads:
@@ -791,10 +807,12 @@ def run_application():
                     active_threads.clear()
                     if picam2.started:
                         picam2.stop()
-                    logging.info(f"[MANAGER] Modalità {current_state} arrestata.")
-                
-                current_state = desired_state
-                if current_state == "METEOR_FINDER":
+                    logging.info(f"[MANAGER] Modalità {local_state} arrestata.")
+
+                with state_lock:
+                    current_state = desired_state
+
+                if desired_state == "METEOR_FINDER":
                     logging.info("[MANAGER] Riconfigurazione camera per METEOR_FINDER...")
                     lores_w = width // APP_CONFIG['downscale_factor']
                     lores_h = height // APP_CONFIG['downscale_factor']
@@ -822,8 +840,8 @@ def run_application():
                     ]
                     state_events['meteor_finder'].set()
                     for t in active_threads: t.start()
-                
-                elif current_state == "TIMELAPSE":
+
+                elif desired_state == "TIMELAPSE":
                     logging.info("[MANAGER] Riconfigurazione camera per TIMELAPSE...")
                     timelapse_controls = {}
                     exposure_val = str(APP_CONFIG['timelapse_exposure']).lower()
@@ -842,27 +860,29 @@ def run_application():
                             capture_format = "RGB888" if APP_CONFIG['timelapse_color'] else "YUV420"
                         except (ValueError, TypeError):
                             logging.error(f"[MANAGER] Valore di esposizione non valido: '{exposure_val}'. Impossibile avviare.")
-                            current_state = "IDLE"
+                            with state_lock:
+                                current_state = "IDLE"
                             continue
                     still_config = picam2.create_still_configuration(main={"size": (width, height), "format": capture_format}, controls=timelapse_controls)
                     picam2.configure(still_config)
                     picam2.start()
                     active_threads = [
-                        threading.Thread(target=timelapse_capture_thread, args=(state_events['timelapse'], width, height), daemon=True, name="TimelapseCapture"),
+                        threading.Thread(target=timelapse_capture_thread, args=(state_events['timelapse'],), daemon=True, name="TimelapseCapture"),
                         threading.Thread(target=timelapse_writer_thread, args=(state_events['timelapse'],), daemon=True, name="TimelapseWriter")
                     ]
                     state_events['timelapse'].set()
                     for t in active_threads: t.start()
-                
-                elif current_state == "POST_PROCESSING":
+
+                elif desired_state == "POST_PROCESSING":
                     logging.info("[MANAGER] Ingresso in modalità POST_PROCESSING...", extra={'state': 'POST_PROCESSING'})
                     timelapse_dir = os.path.join(APP_CONFIG['output_dir'], "timelapse")
                     video_filename = os.path.join(APP_CONFIG['output_dir'], f"timelapse_{datetime.now().strftime('%Y%m%d')}.mp4")
                     create_timelapse_video(image_folder=timelapse_dir, output_filename=video_filename, fps=APP_CONFIG['timelapse_video_fps'], cleanup=APP_CONFIG['timelapse_cleanup_images'])
-                    current_state = "IDLE"
+                    with state_lock:
+                        current_state = "IDLE"
                     logging.info("[MANAGER] Post-processing completato. Ritorno in modalità IDLE.", extra={'state': 'IDLE'})
-                
-                elif current_state == "IDLE":
+
+                elif desired_state == "IDLE":
                     logging.info("[MANAGER] Ingresso in modalità IDLE.", extra={'state': 'IDLE'})
 
             if shutdown_time_obj and not shutdown_initiated:
@@ -871,7 +891,7 @@ def run_application():
                     shutdown_initiated = True
                     shutdown_for_system = True
                     running = False
-            
+
             time.sleep(30)
 
     except KeyboardInterrupt:
@@ -884,9 +904,9 @@ def run_application():
             output_queue.put(None)
         all_threads = [monitor_t] + active_threads
         for t in all_threads: t.join(timeout=5)
-        if picam2.started: picam2.stop()
-        if out: out.release()
-        if ffmpeg_proc:
+        if 'picam2' in globals() and picam2.started: picam2.stop()
+        if 'out' in globals() and out: out.release()
+        if 'ffmpeg_proc' in globals() and ffmpeg_proc:
             if ffmpeg_proc.stdin:
                 try: ffmpeg_proc.stdin.close()
                 except BrokenPipeError: pass
@@ -895,8 +915,7 @@ def run_application():
 
     if shutdown_for_system:
         logging.info("[SHUTDOWN] Esecuzione del comando di spegnimento del sistema...", extra={'state': 'SHUTDOWN'})
-        # ... (shutdown messages)
-        os.sync() 
+        os.sync()
         time.sleep(2)
         os.system("sudo shutdown now")
 
@@ -911,7 +930,7 @@ if __name__ == "__main__":
       e riconfigurando la camera prima di avviare i nuovi.
     - Gestisce lo spegnimento programmato e la chiusura pulita (`KeyboardInterrupt`).
     """
-    
+
     # 1. Definisci i valori predefiniti di base.
     master_defaults = {
         "size": "medium", "binning": True, "gain": 8.0, "codec": "h264", "output_dir": "output",
@@ -942,7 +961,7 @@ if __name__ == "__main__":
         print(f"[CONFIG] File di configurazione non trovato. Creazione di {CONFIG_FILE} con i valori predefiniti.")
         save_config(master_defaults)
         config_data = master_defaults
-        
+
 
     # 3. Avvia l'editor interattivo.
     final_config = edit_config_interactive(config_data)
@@ -950,234 +969,7 @@ if __name__ == "__main__":
     # 4. Se l'utente ha scelto di avviare, popola la configurazione globale e avvia l'applicazione.
     if final_config:
         APP_CONFIG = final_config
-        # La funzione run_application() ora contiene l'intera logica della state machine
-        # e leggerà da APP_CONFIG.
-        
-        # We need to re-implement all the rest of the script inside run_application now.
-        # This is a massive refactor. Let's assume the user can copy-paste the logic.
         print("\n" + "="*15 + " AVVIO APPLICAZIONE " + "="*15)
-        run_application() # This is the conceptual call.
-        
-    active_threads = []
-    state_events = {'meteor_finder': threading.Event(), 'timelapse': threading.Event()}
-    
-    width, height = RESOLUTIONS[APP_CONFIG['size']]
-    
-    # --- Shutdown Time Setup ---
-    shutdown_time_obj = None
-    if APP_CONFIG['shutdown_time']:
-        try:
-            shutdown_time_obj = datetime.strptime(APP_CONFIG['shutdown_time'], "%H:%M").time()
-            logging.info(f"[MANAGER] Spegnimento del sistema programmato per le {APP_CONFIG['shutdown_time']}")
-        except ValueError:
-            logging.error(f"[MANAGER] Formato dell'orario di spegnimento non valido: {APP_CONFIG['shutdown_time']}. La funzione è disabilitata.")
-    
-    shutdown_initiated = False
-    shutdown_for_system = False
-
-    # Avvia i thread universali
-    logging.info("[MAIN] Avvio dei thread universali (Monitor)...")
-    monitor_t = threading.Thread(target=monitor_thread, daemon=True, name="Monitor")
-    monitor_t.start()
-    
-    try:
-        while running:
-            # 1. Determina lo stato desiderato in base alla pianificazione
-            desired_state = "IDLE"
-            is_meteor_time = is_time_in_interval(APP_CONFIG['meteor_start_time'], APP_CONFIG['meteor_end_time'])
-            is_timelapse_time = is_time_in_interval(APP_CONFIG['timelapse_start_time'], APP_CONFIG['timelapse_end_time'])
-
-            if is_meteor_time:
-                desired_state = "METEOR_FINDER"
-            elif is_timelapse_time:
-                desired_state = "TIMELAPSE"
-            elif current_state == "TIMELAPSE" and not is_timelapse_time and APP_CONFIG['timelapse_to_video']:
-                desired_state = "POST_PROCESSING"
-
-            # 2. Se lo stato deve cambiare, esegui la transizione
-            if desired_state != current_state:
-                logging.info(f"[MANAGER] Transizione di stato: {current_state} -> {desired_state}")
-
-                # --- Fase di SHUTDOWN ---
-                if current_state != "IDLE":
-                    logging.info(f"[MANAGER] Arresto della modalità {current_state}...")
-
-                    # 1. Signal all threads in the current mode to stop their loops.
-                    state_events[current_state.lower()].clear()
-                    
-                    # 2. Wait for them to finish gracefully.
-                    #    The writer thread will finish its current file thanks to the sentinel.
-                    for t in active_threads:
-                        t.join(timeout=10) # Give them a generous timeout to finish I/O
-
-                    # 3. Check for any that did not terminate.
-                    alive_threads = [t for t in active_threads if t.is_alive()]
-                    if alive_threads:
-                        logging.warning(f"[MANAGER] I seguenti thread non sono terminati: {[t.name for t in alive_threads]}")
-                    
-                    active_threads.clear()
-                    
-                    # 4. Only stop the camera after all threads that use it are confirmed down.
-                    if picam2.started:                        
-                        picam2.stop()
-                        
-                    logging.info(f"[MANAGER] Modalità {current_state} arrestata.")
-                
-                # --- Fase di STARTUP ---
-                current_state = desired_state
-                if current_state == "METEOR_FINDER":
-                    # ... (Logica di configurazione e avvio thread per METEOR_FINDER)
-                    logging.info("[MANAGER] Riconfigurazione della camera per METEOR_FINDER...")
-                    lores_w = width // APP_CONFIG['downscale_factor']
-                    lores_h = height // APP_CONFIG['downscale_factor']
-                    
-                    # Costruisce i controlli di base
-                    meteor_controls = {"FrameDurationLimits": METEOR_EXPOSURE_LIMITS, "AnalogueGain": APP_CONFIG['gain']}
-                    
-                    # Aggiunge il controllo del framerate solo se la modalità è 'fixed'
-                    if APP_CONFIG['framerate_mode'] == 'fixed':
-                        meteor_controls["FrameRate"] = APP_CONFIG['framerate']
-                        
-                    video_config = picam2.create_video_configuration(
-                        main={"size": (width, height), "format": "YUV420"},
-                        lores={"size": (lores_w, lores_h), "format": "YUV420"},
-                        controls=meteor_controls
-                    )
-                    picam2.configure(video_config)
-                    picam2.start()
-
-                    if APP_CONFIG['framerate_mode'] == 'dynamic':
-                        metadata = picam2.capture_metadata()
-                        effective_framerate = metadata.get("FrameRate")
-                        logging.info(f"[CAMERA] Framerate dinamico rilevato: {effective_framerate:.2f} fps")
-                    else: # 'fixed'
-                        effective_framerate = APP_CONFIG['framerate']
-                        logging.info(f"[CAMERA] Framerate fisso impostato a: {effective_framerate} fps")
-
-                    logging.info(f"[MANAGER] Creazione del pre-event buffer per {APP_CONFIG['pre_event_seconds']} secondi ({int(APP_CONFIG['pre_event_seconds'] * effective_framerate)} frames).")                   
-                    pre_event_buffer = deque(maxlen=int(APP_CONFIG['pre_event_seconds'] * effective_framerate))
-
-                    active_threads = [
-                        threading.Thread(target=capture_thread_meteor, args=(state_events['meteor_finder'], width, height), daemon=True, name="MeteorCapture"),
-                        threading.Thread(target=processing_thread, args=(state_events['meteor_finder'], effective_framerate, pre_event_buffer, width, height), daemon=True, name="MeteorProcess"),
-                        threading.Thread(target=writer_thread, args=(state_events['meteor_finder'],), daemon=True, name="MeteorWriter"),
-                        threading.Thread(target=snapshot_writer_thread, args=(state_events['meteor_finder'],), daemon=True, name="MeteorSnapshot")                    
-                    ]
-                    state_events['meteor_finder'].set()
-                    for t in active_threads: t.start()
-                
-                elif current_state == "TIMELAPSE":
-                    # ... (Logica di configurazione e avvio thread per TIMELAPSE)
-                    logging.info("[MANAGER] Riconfigurazione della camera per TIMELAPSE...")
- 
-                    timelapse_controls = {}
-                    exposure_val = APP_CONFIG['timelapse_exposure'].lower() 
- 
-                    if exposure_val == "automatic":
-                        # Modalità Automatica: lascia che la camera decida tutto
-                        logging.info("[MANAGER] Modalità Timelapse: ESPOSIZIONE AUTOMATICA")
-                        timelapse_controls = {
-                            "AeEnable": True,  # Abilita Auto Exposure
-                            "AwbEnable": True, # Abilita Auto White Balance
-                        }
-                        capture_format = "RGB888" if APP_CONFIG['timelapse_color'] else "YUV420"
-                    else:
-                        # Modalità Manuale: imposta valori fissi
-                        logging.info(f"[MANAGER] Modalità Timelapse: ESPOSIZIONE MANUALE ({exposure_val}s)")
-                        try:
-                            exposure_time_us = int(exposure_val) * 1000000
-                            timelapse_controls = {
-                                "AeEnable": False, "AwbEnable": False,
-                                "AnalogueGain": APP_CONFIG['timelapse_gain'],
-                                "ExposureTime": exposure_time_us,
-                            } 
-                            if HAS_AUTOFOCUS:
-                                timelapse_controls["AfMode"] = controls.AfModeEnum.Manual
-                                timelapse_controls["LensPosition"] = 0.0
-                            capture_format = "RGB888" if APP_CONFIG['timelapse_color'] else "YUV420"
-                        except ValueError:
-                            logging.error(f"[MANAGER] Valore di esposizione non valido: '{exposure_val}'. Impossibile avviare il timelapse.")
-                            current_state = "IDLE" # Torna a IDLE in caso di errore
-                            continue
-                            
-                    still_config = picam2.create_still_configuration(main={"size": (width, height), "format": capture_format}, controls=timelapse_controls)
-                    picam2.configure(still_config)
-                    picam2.start()                            
-
-                    active_threads = [
-                        threading.Thread(target=timelapse_capture_thread, args=(state_events['timelapse'],), daemon=True, name="TimelapseCapture"),
-                        threading.Thread(target=timelapse_writer_thread, args=(state_events['timelapse'],), daemon=True, name="TimelapseWriter")
-                    ]
-                    state_events['timelapse'].set()
-                    for t in active_threads: t.start()
-                
-                elif current_state == "POST_PROCESSING":
-                    # ... (Logica per avviare la creazione del video)                    
-                    logging.info("[MANAGER] Ingresso in modalità POST_PROCESSING per la creazione del video timelapse.")
-                    timelapse_dir = os.path.join(APP_CONFIG['output_dir'], "timelapse")
-                    video_filename = os.path.join(APP_CONFIG['output_dir'], f"timelapse_{datetime.now().strftime('%Y%m%d')}.mp4")
-                    
-                    # Esegui la funzione di creazione video
-                    create_timelapse_video(
-                        image_folder=timelapse_dir,
-                        output_filename=video_filename,
-                        fps=APP_CONFIG['timelapse_video_fps'],
-                        cleanup=APP_CONFIG['timelapse_cleanup_images']
-                    )                
-                    # Dopo il post-processing, lo stato naturale successivo è IDLE
-                    current_state = "IDLE" 
-                    logging.info("[MANAGER] Post-processing completato. Ritorno in modalità IDLE.")               
-                
-                elif current_state == "IDLE":
-                    logging.info("[MANAGER] Ingresso in modalità IDLE.")
-
-            # 3. --- Controllo Spegnimento Programmato ---
-            if shutdown_time_obj and not shutdown_initiated:
-                if datetime.now().time() >= shutdown_time_obj:
-                    logging.info(f"[MANAGER] Orario di spegnimento ({APP_CONFIG['shutdown_time']}) raggiunto. Avvio della terminazione.", extra={'state': 'SHUTDOWN'})
-                    shutdown_initiated = True  # Assicura che questo blocco venga eseguito una sola volta
-                    shutdown_for_system = True # Flag per eseguire il comando di spegnimento dopo la pulizia
-                    running = False            # Avvia la terminazione pulita dello script             
-            
-            time.sleep(30) # Intervallo di controllo dello scheduler
-
-    except KeyboardInterrupt:
-        logging.info("[MAIN] Terminazione richiesta dall'utente...")
-    finally:
-        running = False
-        for event in state_events.values(): event.clear()
-        
-        # Ensure any final video is saved
-        if 'recording_event' in globals() and recording_event.is_set():
-            logging.info("[MAIN] Finalizzazione della registrazione in corso...")
-            output_queue.put(None)
-
-        all_threads = [monitor_t] + active_threads
-        for t in all_threads: t.join(timeout=5)
-        
-        if picam2.started: picam2.stop()
-        
-        # This final check is belt-and-suspenders, but safe
-        if out: out.release()
-        if ffmpeg_proc:
-            if ffmpeg_proc.stdin:
-                try: ffmpeg_proc.stdin.close()
-                except BrokenPipeError: pass
-            ffmpeg_proc.wait()
-        
-        logging.info("[MAIN] Uscita completata.")
-
-    # --- Fase di Spegnimento del Sistema ---
-    # Questo blocco viene eseguito solo dopo che il blocco `finally` è completato
-    if shutdown_for_system:
-        logging.info("[SHUTDOWN] Esecuzione del comando di spegnimento del sistema (sudo shutdown now)...", extra={'state': 'SHUTDOWN'})
-        logging.info("**************************************************", extra={'state': 'SHUTDOWN'})
-        logging.info(f"[SHUTDOWN] Spegnimento del sistema programmato per le {APP_CONFIG['shutdown_time']} in corso...", extra={'state': 'SHUTDOWN'})
-        logging.info("**************************************************", extra={'state': 'SHUTDOWN'})
-        # Svuota i buffer del sistema operativo per assicurarsi che i log siano scritti su disco
-        os.sync() 
-        time.sleep(2) # Breve attesa per sicurezza
-        
-        # Esegui il comando di spegnimento
-        # NOTA: Lo script deve essere eseguito con `sudo` affinché questo comando funzioni.
-        os.system("sudo shutdown now")
+        run_application()
+    else:
+        print("Avvio annullato dall'utente.")
