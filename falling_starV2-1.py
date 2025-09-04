@@ -279,33 +279,48 @@ def capture_thread_meteor(state_event, width, height):
     # Pre-calcola le dimensioni dello stream a bassa risoluzione per lo slicing
     lores_w = width // APP_CONFIG['downscale_factor']
     lores_h = height // APP_CONFIG['downscale_factor']
-
+    
     while running and state_event.is_set():
+#        job = None
         request = None # Inizializza a None per sicurezza
         try:
-            # --- THIS IS THE DEFINITIVE FIX ---
-            # 1. Cattura la richiesta per entrambi gli stream.
-            request = picam2.capture_request()
+            # 1. Avvia la cattura e ottieni un "job". Questo non è bloccante.
+#            job = picam2.capture_request(wait=False)
+            request = picam2.wait(timeout=1000)
+            # 2. Attendi il completamento del job.
+            #    picam2.wait() restituisce un oggetto CompletedRequest in caso di successo,
+            #    o None in caso di timeout.
+#            request = picam2.wait(job, timeout=1000) # Timeout di 1 secondo
+            if request is None:
+                # Se la richiesta scade, logga un avviso e continua.
+                # Questo può accadere se il sistema è sotto carico pesante.
+                logging.warning("[CAPTURE] La richiesta di cattura è scaduta (timeout).")
+                continue # Salta al prossimo ciclo del loo
 
-            # 2. Estrae i dati in array NumPy garantiti.
-            main_frame_yuv = request.make_array("main")
-            lores_frame_yuv = request.make_array("lores")
+            # 3. Prosegui SOLO se abbiamo ricevuto una richiesta completata con successo.
+            if request:
+                main_frame_yuv = request.make_array("main")
+                lores_frame_yuv = request.make_array("lores")
+            
+                main_frame_gray = main_frame_yuv[:height, :width]
+                lores_frame_gray = lores_frame_yuv[:lores_h, :lores_w]
 
-            # Converte in grayscale QUI, una sola volta.
-            main_frame_gray = main_frame_yuv[:height, :width]
-            lores_frame_gray = lores_frame_yuv[:lores_h, :lores_w]
-
-            # 3. Ora che abbiamo array NumPy, li mettiamo nella coda.
-            #    La conversione in grayscale avverrà nel processing_thread.
-            frame_queue.put_nowait((main_frame_gray, lores_frame_gray))
-            update_perf_counter("captured")
+                frame_queue.put_nowait((main_frame_gray, lores_frame_gray))
+                update_perf_counter("captured")
+#            else:
+                # Se la richiesta è None, il timeout è scaduto. Questo è normale durante
+                # lo shutdown della camera, quindi non logghiamo un errore.
+#                continue
 
         except queue.Full:
             pass # Comportamento previsto
         except Exception as e:
-            logging.error(f"[CAPTURE] Errore imprevisto durante la cattura del frame: {e}")
+            # Gli errori di timeout della camera durante lo shutdown sono attesi e possono essere ignorati.
+            if "Camera frontend has timed out" not in str(e):
+                logging.error(f"[CAPTURE] Errore imprevisto durante la cattura del frame: {e}")
         finally:
-            # 4. Rilascia sempre la richiesta per liberare i buffer.
+            # 4. Rilascia la richiesta SOLO se è un oggetto CompletedRequest valido.
+            #    NON tentare mai di rilasciare il "job".
             if request:
                 request.release()
 
@@ -611,67 +626,60 @@ def timelapse_capture_thread(state_event):
     Cattura scatti a lunga esposizione. Usa il pattern `capture_request`/`wait`
     con un timeout personalizzato per gestire in modo robusto esposizioni lunghe.
     """
+    """Cattura scatti a lunga esposizione in modo robusto e a prova di race condition."""
     logging.info("[TIMELAPSE] Thread di cattura avviato.")
-
-    # Determina la modalità di cattura
-    is_manual_exposure = APP_CONFIG['timelapse_exposure'].lower() != "automatic"
+    
+    is_manual_exposure = str(APP_CONFIG['timelapse_exposure']).lower() != "automatic"
     manual_exposure_time = 0
     if is_manual_exposure:
         try:
             manual_exposure_time = int(APP_CONFIG['timelapse_exposure'])
-        except ValueError:
+        except (ValueError, TypeError):
             logging.error(f"[TIMELAPSE] Valore di esposizione manuale non valido: '{APP_CONFIG['timelapse_exposure']}'. Arresto del thread.")
             return
 
     while running and state_event.is_set():
-        capture_start_time = time.time()
-        request = None  # Inizializza per il blocco finally
+        job = None
+        request = None
         try:
+            # --- Fase 1: Cattura ---
             if is_manual_exposure:
-                # --- Flusso per Esposizione Lunga e Manuale ---
                 logging.info(f"[TIMELAPSE] Avvio cattura manuale (esposizione: {manual_exposure_time}s)...")
                 job = picam2.capture_request(wait=False)
                 wait_timeout = manual_exposure_time + 5
                 request = picam2.wait(job, timeout=wait_timeout * 1000)
-                if request is None: raise RuntimeError("La richiesta di cattura manuale è scaduta.")
+                if request is None: 
+                    raise RuntimeError("La richiesta di cattura manuale è scaduta.")
             else:
-                # --- Flusso per Esposizione Automatica ---
                 logging.info(f"[TIMELAPSE] Avvio cattura automatica...")
-                request = picam2.capture_request()  # Semplice chiamata bloccante
-
+                job = picam2.capture_request(wait=False)
+                request = picam2.wait(job, timeout=5000) # Timeout di 5s per l'auto-esposizione
+                if request is None:
+                    raise RuntimeError("La richiesta di cattura automatica è scaduta.")
+            
+            # --- Fase 2: Processamento (solo se la cattura ha avuto successo) ---
             captured_image = request.make_array('main')
-
             if APP_CONFIG['timelapse_color']:
                 final_frame = cv2.cvtColor(captured_image, cv2.COLOR_RGB2BGR)
             else:
                 final_frame = cv2.cvtColor(captured_image, cv2.COLOR_YUV2GRAY_I420)
-
+            
             timelapse_writer_queue.put(final_frame)
             logging.info("[TIMELAPSE] Immagine catturata e inviata per il salvataggio.")
 
         except Exception as e:
             logging.error(f"[TIMELAPSE] Errore durante la cattura: {e}")
         finally:
+            # Rilascia la richiesta SOLO se è un oggetto CompletedRequest valido.
             if request:
                 request.release()
 
-        # --- Logica di attesa corretta ---
-        # Calcola il tempo trascorso e determina quanto tempo attendere per mantenere l'intervallo corretto.
-        capture_duration = time.time() - capture_start_time
-        wait_interval = max(0, APP_CONFIG['timelapse_interval'] - capture_duration)
-
-        logging.info(f"[TIMELAPSE] Cattura completata in {capture_duration:.2f}s. Inizio intervallo di attesa di {wait_interval:.2f} secondi...")
-
-        # Usiamo un ciclo per controllare l'evento di stop più frequentemente (ogni secondo).
-        # Questo ciclo gestisce la parte intera del tempo di attesa.
-        for _ in range(int(wait_interval)):
+        # --- Fase 3: Attesa (Intervallo) ---
+        logging.info(f"[TIMELAPSE] Inizio intervallo di attesa di {APP_CONFIG['timelapse_interval']} secondi...")
+        for _ in range(APP_CONFIG['timelapse_interval']):
             if not (running and state_event.is_set()):
-                break  # Interrompi l'attesa se lo script si sta fermando.
+                break
             time.sleep(1)
-
-        # Se non siamo stati interrotti, attendiamo per la parte frazionaria rimanente.
-        if running and state_event.is_set():
-            time.sleep(wait_interval % 1)
 
     logging.info("[TIMELAPSE] Thread di cattura terminato.")
 
