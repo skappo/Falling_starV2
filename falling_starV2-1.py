@@ -1027,9 +1027,14 @@ def run_video_test(current_config):
         test_picam2 = Picamera2()
         
         # Configurazione Video
-        meteor_controls = {"FrameDurationLimits": METEOR_EXPOSURE_LIMITS, "AnalogueGain": cfg['gain']}
+        meteor_controls = {"AnalogueGain": cfg['gain']}
         framerate = cfg['framerate']
-        meteor_controls["FrameRate"] = framerate
+
+        # Applica i controlli di framerate in modo esclusivo per evitare conflitti
+        if cfg.get('framerate_mode') == 'fixed':
+            meteor_controls["FrameRate"] = framerate
+        else: # La modalità predefinita o dinamica usa i limiti di durata
+            meteor_controls["FrameDurationLimits"] = METEOR_EXPOSURE_LIMITS
             
         video_config = test_picam2.create_video_configuration(
             main={"size": (width, height), "format": "YUV420"},
