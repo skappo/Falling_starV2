@@ -799,11 +799,13 @@ def writer_thread(state_event):
                         except BrokenPipeError:
                             pass
                         ffmpeg_proc.wait()
-                        ffmpeg_proc = None
-                        if out:
-                            out.release()
-                            out = None
-                    recording_event.clear()
+
+                    # Resetta i writer per prevenire ulteriori tentativi di scrittura
+                    ffmpeg_proc = None
+                    if out:
+                        out.release()
+                        out = None
+                    # NON cancellare il recording_event. Lascia che sia il processing_thread a gestire lo stato.
         except queue.Empty:
             # È normale che la coda sia vuota, continua semplicemente ad attendere.
             time.sleep(0.01)
@@ -1049,19 +1051,24 @@ def run_video_test(current_config):
             lores_w = width // cfg['downscale_factor']
             lores_h = height // cfg['downscale_factor']
             while test_running and state_event.is_set():
+                job = None
+                request = None
                 try:
-                    request = test_picam2.capture_request(timeout=1000)
+                    job = test_picam2.capture_request(wait=False)
+                    request = test_picam2.wait(job, timeout=1000)
                     if request:
                         main_frame_yuv = request.make_array("main")
                         lores_frame_yuv = request.make_array("lores")
                         main_frame_gray = main_frame_yuv[:height, :width]
                         lores_frame_gray = lores_frame_yuv[:lores_h, :lores_w]
                         test_frame_queue.put_nowait((main_frame_gray, lores_frame_gray))
-                        request.release()
                 except queue.Full:
                     pass
                 except Exception as e:
                     if test_running and state_event.is_set(): logging.error(f"[TEST_CAPTURE] Errore: {e}")
+                finally:
+                    if request:
+                        request.release()
 
         def bridge_for_test():
             """Il thread intermedio che disaccoppia la cattura dalla scrittura."""
