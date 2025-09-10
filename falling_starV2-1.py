@@ -13,6 +13,7 @@ import queue
 import os
 from datetime import datetime
 from collections import deque
+from logging.handlers import RotatingFileHandler
 from picamera2 import Picamera2
 #from picamera2.encoders import H264Encoder
 from libcamera import controls
@@ -23,40 +24,15 @@ from colorama import Fore, Style, Back, init
 APP_CONFIG = {}
 
 # === CONTROLLO DIPENDENZE ===
-# Blocco di controllo per garantire che tutte le librerie necessarie siano installate
-# prima di avviare lo script. Fornisce messaggi chiari e comandi di installazione.
-REQUIRED_PACKAGES = {
-    "cv2": "opencv-python",
-    "numpy": "numpy",
-    "picamera2": "picamera2",
-    "ffmpeg": None,
-    "colorama": "colorama"
-}
-
-missing = []
-
-for module_name, pip_name in REQUIRED_PACKAGES.items():
-    try:
-        if module_name == "ffmpeg":
-            if not shutil.which("ffmpeg"):
-                raise ImportError
-        else:
-            importlib.import_module(module_name)
-    except ImportError:
-        missing.append(pip_name or module_name)
-
-if missing:
-    print("\n🚫 Dipendenze mancanti rilevate:")
-    for pkg in missing:
-        print(f"  - {pkg}")
-    print("\n➡️  Puoi installarle con:")
-    print(f"  pip install {' '.join([pkg for pkg in missing if pkg])}")
-    print("🔧 Oppure su Raspberry Pi:\n  sudo apt install python3-opencv python3-numpy python3-picamera2 ffmpeg\n")
-    sys.exit(1)
+# opencv-python
+# numpy
+# picamera2 
+# ffmpeg
+# colorama
+#
 
 # === PARAMETRI DERIVATI (Definitive Final Version) ===
-# Queste costanti sono definite globalmente in modo che siano accessibili
-# da tutte le funzioni, incluso l'editor di configurazione.
+# Queste costanti sono definite globalmente
 RESOLUTIONS = {"small": (640, 480), "medium": (1280, 720), "large": (1920, 1080)}
 METEOR_EXPOSURE_LIMITS = (50000, 1000000)
 CHOICES = {
@@ -89,12 +65,9 @@ def save_config(config_dict):
     except Exception as e:
         print(f"{Fore.RED}[ERROR] Impossibile salvare la configurazione in {CONFIG_FILE}: {e}{Style.RESET_ALL}")
 
-# === EDITOR INTERATTIVO DELLA CONFIGURAZIONE (Now the main entry point) ===
+# === EDITOR INTERATTIVO DELLA CONFIGURAZIONE ===
 def resolve_resolution(cfg):
-    """Restituisce (w, h) in base a cfg['size'] o cfg['resolution'].
-    Precedenza a 'size' (stringa: small/medium/large). In alternativa, usa
-    'resolution' che può essere una stringa (chiave di RESOLUTIONS) oppure una
-    tupla/lista (w, h). Fallback: 'medium'."""
+    #Restituisce (w, h) in base a cfg['size'] o cfg['resolution'].
     size_key = cfg.get('size')
     if isinstance(size_key, str) and size_key in RESOLUTIONS:
         return RESOLUTIONS[size_key]
@@ -107,13 +80,11 @@ def resolve_resolution(cfg):
 
     return RESOLUTIONS['medium']  # fallback
 
-
 def update_autocalculated(cfg):
-    """
-    Aggiorna i valori auto-calcolati in base alla configurazione corrente.
-    - Calcola frame_size_bytes assumendo immagini in scala di grigi (Y from YUV): 1 byte/pixel
-    - Ricalcola frame_queue_maxsize, output_queue_maxsize e estimated_memory_mb
-    """
+# Aggiorna i valori auto-calcolati in base alla configurazione corrente.
+# - Calcola frame_size_bytes assumendo immagini in scala di grigi (Y from YUV): 1 byte/pixel
+# - Ricalcola frame_queue_maxsize, output_queue_maxsize e estimated_memory_mb
+
     megabyte = 1048576
     safety_cushion = 1.05
     try:
@@ -134,24 +105,16 @@ def update_autocalculated(cfg):
         cfg['frame_queue_mb'] = round((cfg['frame_queue_maxsize'] * frame_size_bytes) / megabyte, 2)
         cfg['output_queue_mb'] = round((cfg['output_queue_maxsize'] * frame_size_bytes) / megabyte, 2)
 
-        # Uso memoria stimato
- #       total_frames = cfg['frame_queue_maxsize'] + cfg['output_queue_maxsize']
- #       cfg['estimated_memory_mb'] = round((total_frames * frame_size_bytes) / (1024 * 1024), 2)
-
     except Exception:
-#        cfg['frame_size_bytes'] = 0
         cfg['frame_queue_maxsize'] = 0
         cfg['output_queue_maxsize'] = 0
-#        cfg['estimated_memory_mb'] = 0.0
         cfg['frame_queue_mb'] = 0.0
         cfg['output_queue_mb'] = 0.0
 
 
 def edit_config_interactive(current_config):
-    """
-    Mostra un menu interattivo per modificare la configurazione, con validazione,
-    calcolo dinamico delle code e visualizzazione delle scelte.
-    """
+# Menu per modificare la configurazione, validazione e calcolo dinamico delle code.
+
     cfg = current_config.copy()
     update_autocalculated(cfg)
 
@@ -181,7 +144,7 @@ def edit_config_interactive(current_config):
                 extra = f"{cfg.get('output_queue_mb')} MB)"
                 print(f"  {Fore.LIGHTBLACK_EX}{i:2d}. {key:<28}{Style.RESET_ALL} = {value_str} (Auto-Calcolato: {extra}")
                 continue
-            elif key in ['estimated_memory_mb', 'frame_size_bytes', 'resolution', 'frame_queue_mb', 'output_queue_mb' ]:
+            elif key in ['estimated_memory_mb', 'frame_size_bytes', 'resolution', 'frame_queue_mb', 'output_queue_mb', 'log_max_size', 'log_backup_count' ]:
                 # non visualizzare separatamente
                 continue
 
@@ -232,7 +195,7 @@ def edit_config_interactive(current_config):
             key_to_edit = keys[int(choice) - 1]
 
             # Blocco modifica per parametri auto-calcolati
-            if key_to_edit in ['frame_queue_maxsize', 'output_queue_maxsize', 'estimated_memory_mb', 'frame_size_bytes', 'resolution']:
+            if key_to_edit in ['frame_queue_maxsize', 'output_queue_maxsize', 'estimated_memory_mb', 'frame_size_bytes', 'resolution', 'log_max_size', 'log_backup_count']:
                 print(f"\n{Fore.YELLOW}[INFO] Il parametro '{key_to_edit}' è calcolato automaticamente.{Style.RESET_ALL}")
                 time.sleep(2)
                 continue
@@ -292,10 +255,8 @@ def edit_config_interactive(current_config):
         
 # === LOGGING CLASS ===
 class ColoredFormatter(logging.Formatter):
-    """
-    Formatter personalizzato che applica colori specifici per data, livello e tag,
-    con una palette ottimizzata per sfondi scuri.
-    """
+# colora per data, livello e tag,
+
     DATETIME_COLOR = Fore.LIGHTBLACK_EX
     MESSAGE_COLOR = Fore.WHITE
     RESET = Style.RESET_ALL
@@ -472,64 +433,6 @@ def update_perf_counter(counter_name, increment=1):
 
 # === THREADS ===
 
-# --- Universal Threads ---
-def capture_thread_meteor(state_event, width, height):
-    """
-    THREAD CRITICO: Produttore per la modalità METEOR_FINDER.
-    - Cattura due stream (alta e bassa risoluzione) dalla camera.
-    - Usa il pattern `capture_request` per garantire dati validi e stabili.
-    - Converte immediatamente entrambi gli stream in grayscale per efficienza.
-    - Usa `put_nowait` per scartare frame se la pipeline è piena, evitando blocchi.
-    """
-    # Pre-calcola le dimensioni dello stream a bassa risoluzione per lo slicing
-    lores_w = width // APP_CONFIG['downscale_factor']
-    lores_h = height // APP_CONFIG['downscale_factor']
-    
-    while running and state_event.is_set():
-        job = None
-        request = None # Inizializza a None per sicurezza
-        try:
-            # 1. Avvia la cattura e ottieni un "job". Questo non è bloccante.
-            job = picam2.capture_request(wait=False)
-
-            # 2. Attendi il completamento del job.
-            #    picam2.wait() restituisce un oggetto CompletedRequest in caso di successo,
-            #    o None in caso di timeout.
-            request = picam2.wait(job, timeout=1000) # Timeout di 1 secondo
-
-#            if request is None:
-#                # Se la richiesta scade, logga un avviso e continua.
-#                # Questo può accadere se il sistema è sotto carico pesante.
-#                logging.warning("[CAPTURE] La richiesta di cattura è scaduta (timeout).")
-#                continue # Salta al prossimo ciclo del loo
-
-            # 3. Prosegui SOLO se abbiamo ricevuto una richiesta completata con successo.
-            if request:
-                main_frame_yuv = request.make_array("main")
-                lores_frame_yuv = request.make_array("lores")
-          
-                main_frame_gray = main_frame_yuv[:height, :width]
-                lores_frame_gray = lores_frame_yuv[:lores_h, :lores_w]
-
-                frame_queue.put_nowait((main_frame_gray, lores_frame_gray))
-                update_perf_counter("captured")
-            else:
-                # Se la richiesta è None, il timeout è scaduto. Questo è normale durante
-                # lo shutdown della camera, quindi non logghiamo un errore.
-                logging.warning("[CAPTURE] La richiesta di cattura del frame è scaduta (timeout).")
-                continue
-
-        except queue.Full:
-            pass # Comportamento previsto
-        except Exception as e:
-            if "Camera frontend has timed out" not in str(e):
-                logging.error(f"[CAPTURE] Errore imprevisto: {e}")
-        finally:
-            # 4. Rilascia la richiesta SOLO se è un oggetto CompletedRequest valido.
-            #    NON tentare mai di rilasciare il "job".
-            if request:
-                request.release()
-
 def monitor_thread():
     """
     THREAD CRITICO: Stampa lo stato del sistema e i contatori.
@@ -611,7 +514,65 @@ def monitor_thread():
         logging.info(f"  Stato -> Registrazione Attiva: {status}, Code [Meteora/Video/Snap/Timelapse]: "f"[{q_frame}/{q_out}/{q_snap}/{q_tl}]")
 
 # --- Meteor Finder Threads ---
-def processing_thread(state_event, effective_framerate, pre_event_buffer, width, height):
+def capture_thread_meteor(state_event, width, height, downscale_factor):
+    """
+    THREAD CRITICO: Produttore per la modalità METEOR_FINDER.
+    - Cattura due stream (alta e bassa risoluzione) dalla camera.
+    - Usa il pattern `capture_request` per garantire dati validi e stabili.
+    - Converte immediatamente entrambi gli stream in grayscale per efficienza.
+    - Usa `put_nowait` per scartare frame se la pipeline è piena, evitando blocchi.
+    """
+    # Pre-calcola le dimensioni dello stream a bassa risoluzione per lo slicing
+	
+    lores_w = width // downscale_factor
+    lores_h = height // downscale_factor
+    
+    while running and state_event.is_set():
+        job = None
+        request = None # Inizializza a None per sicurezza
+        try:
+            # 1. Avvia la cattura e ottieni un "job". Questo non è bloccante.
+            job = picam2.capture_request(wait=False)
+
+            # 2. Attendi il completamento del job.
+            #    picam2.wait() restituisce un oggetto CompletedRequest in caso di successo,
+            #    o None in caso di timeout.
+            request = picam2.wait(job, timeout=1000) # Timeout di 1 secondo
+
+#            if request is None:
+#                # Se la richiesta scade, logga un avviso e continua.
+#                # Questo può accadere se il sistema è sotto carico pesante.
+#                logging.warning("[CAPTURE] La richiesta di cattura è scaduta (timeout).")
+#                continue # Salta al prossimo ciclo del loo
+
+            # 3. Prosegui SOLO se abbiamo ricevuto una richiesta completata con successo.
+            if request:
+                main_frame_yuv = request.make_array("main")
+                lores_frame_yuv = request.make_array("lores")
+          
+                main_frame_gray = main_frame_yuv[:height, :width]
+                lores_frame_gray = lores_frame_yuv[:lores_h, :lores_w]
+
+                frame_queue.put_nowait((main_frame_gray, lores_frame_gray))
+                update_perf_counter("captured")
+            else:
+                # Se la richiesta è None, il timeout è scaduto. Questo è normale durante
+                # lo shutdown della camera, quindi non logghiamo un errore.
+                logging.warning("[CAPTURE] La richiesta di cattura del frame è scaduta (timeout).")
+                continue
+
+        except queue.Full:
+            pass # Comportamento previsto
+        except Exception as e:
+            if "Camera frontend has timed out" not in str(e):
+                logging.error(f"[CAPTURE] Errore imprevisto: {e}")
+        finally:
+            # 4. Rilascia la richiesta SOLO se è un oggetto CompletedRequest valido.
+            #    NON tentare mai di rilasciare il "job".
+            if request:
+                request.release()
+
+def processing_thread(state_event, effective_framerate, pre_event_buffer, width, height, current_config):
     """
     THREAD CRITICO: Il "cervello" della modalità METEOR_FINDER.
     - Consumatore della `frame_queue`.
@@ -623,7 +584,9 @@ def processing_thread(state_event, effective_framerate, pre_event_buffer, width,
     """
     global reference_frame, last_event_time, out, ffmpeg_proc, record_start_time
 
-    scaled_trigger_area = APP_CONFIG['trigger_area'] / (APP_CONFIG['downscale_factor']**2)
+    cfg = current_config
+
+    scaled_trigger_area = cfg['trigger_area'] / (cfg['downscale_factor']**2)
     is_shutting_down = False
 
     while running and state_event.is_set():
@@ -669,14 +632,14 @@ def processing_thread(state_event, effective_framerate, pre_event_buffer, width,
                 reference_frame = blurred.copy().astype("float")
                 continue
             frame_diff = cv2.absdiff(blurred, cv2.convertScaleAbs(reference_frame))
-            _, thresh = cv2.threshold(frame_diff, APP_CONFIG['diff_threshold'], 255, cv2.THRESH_BINARY)
+            _, thresh = cv2.threshold(frame_diff, cfg['diff_threshold'], 255, cv2.THRESH_BINARY)
             changed_area = cv2.countNonZero(thresh)
             motion_detected = changed_area > scaled_trigger_area
-            cv2.accumulateWeighted(blurred, reference_frame, APP_CONFIG['learning_rate'])
+            cv2.accumulateWeighted(blurred, reference_frame, cfg['learning_rate'])
         else: # contour strategy
-            _, thresh = cv2.threshold(blurred, APP_CONFIG['min_brightness'], 255, cv2.THRESH_BINARY)
+            _, thresh = cv2.threshold(blurred, cfg['min_brightness'], 255, cv2.THRESH_BINARY)
             contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            motion_detected = any(cv2.contourArea(c) > APP_CONFIG['min_area'] for c in contours)
+            motion_detected = any(cv2.contourArea(c) > cfg['min_area'] for c in contours)
 
         # --- Gestione Buffer e Registrazione ---
         pre_event_buffer.append(full_res_frame.copy())
@@ -685,15 +648,15 @@ def processing_thread(state_event, effective_framerate, pre_event_buffer, width,
         # Caso 1: Rilevato un nuovo evento
         if motion_detected and not recording_event.is_set() and (current_time - last_event_time > 2):
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = os.path.join(APP_CONFIG['output_dir'], f"evento_{timestamp}.{extension}")
-            snapshot_path = os.path.join(APP_CONFIG['output_dir'], f"snapshot_{timestamp}.jpg")
+            filename = os.path.join(cfg['output_dir'], f"evento_{timestamp}.{extension}")
+            snapshot_path = os.path.join(cfg['output_dir'], f"snapshot_{timestamp}.jpg")
 
             try:
                 snapshot_queue.put((snapshot_path, full_res_frame.copy()), block=False)
             except queue.Full:
                 logging.warning("[PROCESS] Coda snapshot piena, snapshot scartato.")
 
-            if APP_CONFIG['codec'] == "h264":
+            if cfg['codec'] == "h264":
                 ffmpeg_proc = start_ffmpeg_writer(filename, width, height, effective_framerate)
             else:
                 out = cv2.VideoWriter(filename, fourcc, effective_framerate, (width, height), isColor=False)
@@ -718,7 +681,7 @@ def processing_thread(state_event, effective_framerate, pre_event_buffer, width,
                 logging.warning("[PROCESS] Coda di output piena, frame perso")
 
             # Controlla se è ora di terminare la registrazione
-            if time.time() - record_start_time > APP_CONFIG['record_duration']:
+            if time.time() - record_start_time > cfg['record_duration']:
                 logging.info("[PROCESS] Durata registrazione terminata. Inizio procedura di arresto...")
                 is_shutting_down = True
 
@@ -803,7 +766,7 @@ def writer_thread(state_event):
                         if out:
                             out.release()
                             out = None
-                    recording_event.clear()
+#                    recording_event.clear()
         except queue.Empty:
             # È normale che la coda sia vuota, continua semplicemente ad attendere.
             time.sleep(0.01)
@@ -825,6 +788,38 @@ def snapshot_writer_thread(state_event):
             continue
         except Exception as e:
             logging.error(f"[SNAPSHOT] Errore nel salvataggio snapshot: {e}")
+
+def bridge_for_test(filename, width, height, framerate, codec):
+# Il thread intermedio che disaccoppia la cattura dalla scrittura.
+# is_shutting_down = False
+    global running
+    while running and state_event.is_set():
+        try:
+            current_time = time.time()
+            record_start_time = current_time
+            frame_tuple = test_frame_queue.get(timeout=0.1)
+					
+            if codec == "h264":
+                ffmpeg_proc = start_ffmpeg_writer(filename, width, height, framerate)
+            else:
+                out = cv2.VideoWriter(filename, fourcc, framerate, (width, height), isColor=False)
+
+            test_output_queue.put(frame_tuple[0]) # Passa solo il frame ad alta risoluzione
+
+            if time.time() - record_start_time > 5:
+                logging.info("[PROCESS] Durata registrazione terminata. Inizio procedura di arresto...")
+				#	is_shutting_down = True
+
+                #if is_shutting_down:
+                try:
+                    output_queue.put(None, timeout=0.5)
+                    logging.info("[PROCESS] Segnale di stop finale inviato prima della terminazione.")
+                except queue.Full:
+                    logging.error("[PROCESS] Impossibile inviare il segnale di stop finale. Il video potrebbe non essere finalizzato.")
+
+        except queue.Empty:
+            continue
+
 
 # --- Timelapse Threads ---
 def timelapse_capture_thread(state_event):
@@ -910,15 +905,14 @@ def timelapse_writer_thread(state_event):
 # === FUNZIONI AUSILIARIE ===
 
 def clear_screen():
-    """Pulisce lo schermo del terminale per una visualizzazione pulita."""
+# Pulisce lo schermo del terminale per una visualizzazione pulita.
     os.system('cls' if os.name == 'nt' else 'clear')
 
 def run_auto_test():
-    """
-    Esegue un test diagnostico della camera per suggerire impostazioni ottimali.
-    - Misura il framerate massimo in modalità video grayscale.
-    - Esegue uno scatto in modalità completamente automatica per trovare l'esposizione e il gain ideali.
-    """
+# Esegue un test diagnostico della camera.
+# - Misura il framerate massimo in modalità video grayscale per trovare il framerate massimo.
+# - Esegue uno scatto in modalità completamente automatica per trovare l'esposizione e il gain ideali.
+
     clear_screen()
     print("\n" + "="*15 + " TEST AUTOMATICO CAMERA " + "="*15)
     print(f"{Fore.YELLOW}Questo test configurerà la camera per misurare le prestazioni.\n"
@@ -1001,6 +995,7 @@ def run_video_test(current_config):
     completa e accurata (Capture -> Bridge -> Writer) che utilizza l'encoder hardware
     per una simulazione perfetta e affidabile.
     """
+    global test_frame_queue, test_output_queue, picam2, running, test_running, state_event 
     clear_screen()
     print("\n" + "="*15 + " TEST VIDEO (METEOR FINDER) " + "="*15)
     print(f"{Fore.YELLOW}Questo test registrerà un video di 5 secondi con le impostazioni attuali...{Style.RESET_ALL}")
@@ -1012,86 +1007,74 @@ def run_video_test(current_config):
     state_event.set()
     
     # Variabili di stato locali per i thread di test
-    test_running = True
+    running = True
     
     try:
         cfg = current_config
         res = RESOLUTIONS[cfg['size']]
         width, height = res[0], res[1]
         
-        test_frame_queue = queue.Queue(maxsize=30)
-        test_output_queue = queue.Queue(maxsize=120)
-        
-        test_picam2 = Picamera2()
-        
-        # Configurazione Video
-        meteor_controls = {"FrameDurationLimits": METEOR_EXPOSURE_LIMITS, "AnalogueGain": cfg['gain']}
-        framerate = cfg['framerate']
-        meteor_controls["FrameRate"] = framerate
-            
-        video_config = test_picam2.create_video_configuration(
-            main={"size": (width, height), "format": "YUV420"},
-            lores={"size": (width // cfg['downscale_factor'], height // cfg['downscale_factor'])},
-            controls=meteor_controls
-        )
-        test_picam2.configure(video_config)
-        test_picam2.start()
-        
+        test_frame_queue = queue.Queue(maxsize=cfg['frame_queue_maxsize'])
+        test_output_queue = queue.Queue(maxsize=cfg['output_queue_maxsize'])
+      
+        active_threads = []
+        state_events = {'meteor_finder': threading.Event(), 'timelapse': threading.Event(), 'test_run': threading.Event()}      
+
+        picam2 = Picamera2()
+
+		# === CODEC ===
+		# Determina l'estensione del file e il FourCC per i codec non-H264.
+        if cfg['codec'] == "avi":
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+            extension = "avi"
+        elif cfg['codec'] == "mjpeg":
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+            extension = "avi"
+        elif cfg['codec'] == "h264":
+            fourcc = None
+            extension = "mp4"
+        else:
+            raise ValueError("Codec non supportato.")		
+
         output_dir = cfg['output_dir']
         os.makedirs(output_dir, exist_ok=True)
-        filename = os.path.join(output_dir, "TEST_VIDEO.mp4")
+        filename = os.path.join(cfg['output_dir'], f"evento_test.{extension}")
+     
+        # Configurazione Video		
+        lores_w = width // cfg['downscale_factor']
+        lores_h = height // cfg['downscale_factor']
+		
+        meteor_controls = {"FrameDurationLimits": METEOR_EXPOSURE_LIMITS, "AnalogueGain": cfg['gain']}
+        if cfg['framerate_mode'] == 'fixed':
+            meteor_controls["FrameRate"] = cfg['framerate']
+        else: # La modalità predefinita o dinamica usa i limiti di durata
+            meteor_controls["FrameDurationLimits"] = METEOR_EXPOSURE_LIMITS
         
-        # 1. Avvia il writer ffmpeg con l'encoder hardware.
-        ffmpeg_proc = start_ffmpeg_writer(filename, width, height, framerate)
+        video_config = picam2.create_video_configuration(
+            main={"size": (width, height), "format": "YUV420"},
+            lores={"size": (lores_w, lores_h), "format": "YUV420"},
+            controls=meteor_controls
+        )		
+           
+        picam2.configure(video_config)
+        picam2.start()
+
+        effective_framerate = cfg['framerate']
+        if cfg['framerate_mode'] == 'dynamic':
+            metadata = picam2.capture_metadata()
+            effective_framerate = metadata.get("FrameRate", cfg['framerate'])       
         
         # 2. Definisci i thread di test
-        def capture_for_test():
-            lores_w = width // cfg['downscale_factor']
-            lores_h = height // cfg['downscale_factor']
-            while test_running and state_event.is_set():
-                try:
-                    request = test_picam2.capture_request(timeout=1000)
-                    if request:
-                        main_frame_yuv = request.make_array("main")
-                        lores_frame_yuv = request.make_array("lores")
-                        main_frame_gray = main_frame_yuv[:height, :width]
-                        lores_frame_gray = lores_frame_yuv[:lores_h, :lores_w]
-                        test_frame_queue.put_nowait((main_frame_gray, lores_frame_gray))
-                        request.release()
-                except queue.Full:
-                    pass
-                except Exception as e:
-                    if test_running and state_event.is_set(): logging.error(f"[TEST_CAPTURE] Errore: {e}")
-
-        def bridge_for_test():
-            """Il thread intermedio che disaccoppia la cattura dalla scrittura."""
-            while test_running and state_event.is_set():
-                try:
-                    frame_tuple = test_frame_queue.get(timeout=0.1)
-                    test_output_queue.put(frame_tuple[0]) # Passa solo il frame ad alta risoluzione
-                except queue.Empty:
-                    continue
-        
-        def writer_for_test():
-            while test_running or not test_output_queue.empty():
-                try:
-                    item = test_output_queue.get(timeout=0.1)
-                    if item is None: break
-                    if ffmpeg_proc and ffmpeg_proc.stdin:
-                        ffmpeg_proc.stdin.write(item.tobytes())
-                except queue.Empty:
-                    continue
-                except Exception as e:
-                    logging.error(f"[TEST_WRITER] Errore: {e}")
-
+     
         # 3. Avvia i thread
-        threads = [
-            threading.Thread(target=capture_for_test, daemon=True),
-            threading.Thread(target=bridge_for_test, daemon=True),
-            threading.Thread(target=writer_for_test, daemon=True)
+        threads = [                           
+			threading.Thread(target=capture_thread_meteor, args=(state_events['meteor_finder'], width, height, cfg['downscale_factor']), daemon=True, name="MeteorCapture"),
+			threading.Thread(target=bridge_for_test, args=(filename, width, height, effective_framerate, cfg['codec']), daemon=True),
+			threading.Thread(target=writer_thread, args=(state_events['meteor_finder'],), daemon=True, name="MeteorWriter"),
         ]
         
         logging.info(f"[TEST] Avvio registrazione video di test in: {filename}")
+        state_events['test_run'].set()
         for t in threads: t.start()
         
         time.sleep(5) # Durata del test
@@ -1102,7 +1085,8 @@ def run_video_test(current_config):
         logging.error(f"[TEST] Si è verificato un errore durante il test video: {e}")
     finally:
         # 4. Esegui una chiusura pulita e garantita.
-        test_running = False
+        running = False
+        test_running = True
         state_event.clear()
         
         if 'test_output_queue' in locals():
@@ -1117,10 +1101,10 @@ def run_video_test(current_config):
                 except BrokenPipeError: pass
             ffmpeg_proc.wait(timeout=2)
         
-        if test_picam2 and test_picam2.started:
-            test_picam2.stop()
-        if test_picam2:
-            test_picam2.close()
+        if picam2.started:
+            picam2.stop()
+        if picam2:
+            picam2.close()
             logging.info("[TEST] Camera di test chiusa correttamente.")
     
     input("\nPremi Invio per tornare al menu principale...")
@@ -1270,19 +1254,35 @@ def run_application():
     global picam2, frame_queue, output_queue, snapshot_queue, timelapse_writer_queue
     global STRATEGY, RESOLUTIONS, METEOR_EXPOSURE_LIMITS, HAS_AUTOFOCUS, fourcc, extension
 
-    # === LOGGING SETUP (Now safe to call) ===
+    # === LOGGING SETUP ===
+    init(autoreset=True)
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     if APP_CONFIG['no_log_events']: logger.setLevel(logging.CRITICAL + 1)
     for handler in logger.handlers[:]: logger.removeHandler(handler)
-    file_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    file_handler = logging.FileHandler("detection_log.log")
+
+#    file_handler = logging.FileHandler("detection_log.log")
+    log_filename = "detection_log.log"
+    max_bytes = APP_CONFIG['log_max_size'] * 1024 * 1024
+    backup_count = APP_CONFIG['log_backup_count']
+
+    # Crea un file handler che ruota automaticamente i log
+    file_handler = RotatingFileHandler(
+        log_filename, 
+        maxBytes=max_bytes, 
+        backupCount=backup_count
+    )
+
+    file_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")    
     file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
+    
     console_formatter = ColoredFormatter("%(asctime)s [%(levelname)s] %(message)s")
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
+    
+    logging.info(f"[MAIN] Logging configurato. Rotazione del file '{log_filename}' a {APP_CONFIG['log_max_size']} MB, mantenendo {backup_count} backups.")
 
     # === PARAMETER SETUP ===
     STRATEGY = APP_CONFIG['strategy']
@@ -1317,7 +1317,7 @@ def run_application():
 
     # === MAIN STATE MACHINE ===
     active_threads = []
-    state_events = {'meteor_finder': threading.Event(), 'timelapse': threading.Event()}
+    state_events = {'meteor_finder': threading.Event(), 'timelapse': threading.Event(), 'test_run': threading.Event()}
 
     # Initialize global variables for threads
     reference_frame = None
@@ -1401,8 +1401,8 @@ def run_application():
                     logging.info(f"[CAMERA] Framerate effettivo impostato a: {effective_framerate:.2f} fps")
                     pre_event_buffer = deque(maxlen=int(APP_CONFIG['pre_event_seconds'] * effective_framerate))
                     active_threads = [                           
-                        threading.Thread(target=capture_thread_meteor, args=(state_events['meteor_finder'], width, height), daemon=True, name="MeteorCapture"),
-                        threading.Thread(target=processing_thread, args=(state_events['meteor_finder'], effective_framerate, pre_event_buffer, width, height), daemon=True, name="MeteorProcess"),
+                        threading.Thread(target=capture_thread_meteor, args=(state_events['meteor_finder'], width, height, APP_CONFIG['downscale_factor']), daemon=True, name="MeteorCapture"),
+                        threading.Thread(target=processing_thread, args=(state_events['meteor_finder'], effective_framerate, pre_event_buffer, width, height, APP_CONFIG), daemon=True, name="MeteorProcess"),
                         threading.Thread(target=writer_thread, args=(state_events['meteor_finder'],), daemon=True, name="MeteorWriter"),
                         threading.Thread(target=snapshot_writer_thread, args=(state_events['meteor_finder'],), daemon=True, name="MeteorSnapshot")
                     ]
@@ -1515,7 +1515,8 @@ if __name__ == "__main__":
         "timelapse_to_video": False, "timelapse_video_fps": 24, "timelapse_cleanup_images": False,
         "no_log_events": False, "shutdown_time": None,
         "frame_queue_maxsize": 20, "output_queue_maxsize": 120,
-        "snapshot_queue_maxsize": 10, "downscale_factor": 4
+        "snapshot_queue_maxsize": 10, "downscale_factor": 4,
+        "safety_cushion": 5, "log_max_size": 10, "log_backup_count": 5
     }
 
 
@@ -1560,13 +1561,13 @@ if __name__ == "__main__":
             # Ricarica l'editor con l'ultima configurazione (errata) per la correzione.
             config_data = final_config
 
-    # 3. Avvia l'editor interattivo.
-    final_config = edit_config_interactive(config_data)
+#    # 3. Avvia l'editor interattivo.
+ #   final_config = edit_config_interactive(config_data)
 
-    # 4. Se l'utente ha scelto di avviare, popola la configurazione globale e avvia l'applicazione.
-    if final_config:
-        APP_CONFIG = final_config
-        print("\n" + "="*15 + " AVVIO APPLICAZIONE " + "="*15)
-        run_application()
-    else:
+ #   # 4. Se l'utente ha scelto di avviare, popola la configurazione globale e avvia l'applicazione.
+ #   if final_config:
+ #       APP_CONFIG = final_config
+ #       print("\n" + "="*15 + " AVVIO APPLICAZIONE " + "="*15)
+ #       run_application()
+ #   else:
         print("Avvio annullato dall'utente.")
