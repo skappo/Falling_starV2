@@ -1424,7 +1424,7 @@ if __name__ == "__main__":
         "timelapse_to_video": False, "timelapse_video_fps": 24, "timelapse_cleanup_images": False,
         "no_log_events": False, "frame_queue_maxsize": 20, "output_queue_maxsize": 120,
         "snapshot_queue_maxsize": 10, "downscale_factor": 4,
-        "safety_cushion": 5, "log_max_size": 10, "log_backup_count": 5, "shutdown_time": None
+        "safety_cushion": 1.2, "log_max_size": 10, "log_backup_count": 5, "shutdown_time": None
     }
 
 
@@ -1473,3 +1473,4 @@ if __name__ == "__main__":
             for error in errors: print(f"{Fore.RED}  - {error}{Style.RESET_ALL}")
             input(f"\n{Style.DIM}Premi Invio per tornare all'editor...{Style.RESET_ALL}")
             config_data = {k: v for k, v in final_config.items() if not k.startswith('__')}
+
