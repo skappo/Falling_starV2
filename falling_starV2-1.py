@@ -514,7 +514,7 @@ def monitor_thread():
         logging.info(f"  Stato -> Registrazione Attiva: {status}, Code [Meteora/Video/Snap/Timelapse]: "f"[{q_frame}/{q_out}/{q_snap}/{q_tl}]")
 
 # --- Meteor Finder Threads ---
-def capture_thread_meteor(state_event, width, height, downscale_factor):
+def capture_thread_meteor(state_event, width, height, downscale_factor, frame_queue, picam2, update_perf_counter=None):
     """
     THREAD CRITICO: Produttore per la modalità METEOR_FINDER.
     - Cattura due stream (alta e bassa risoluzione) dalla camera.
@@ -522,57 +522,47 @@ def capture_thread_meteor(state_event, width, height, downscale_factor):
     - Converte immediatamente entrambi gli stream in grayscale per efficienza.
     - Usa `put_nowait` per scartare frame se la pipeline è piena, evitando blocchi.
     """
-    # Pre-calcola le dimensioni dello stream a bassa risoluzione per lo slicing
-	
     lores_w = width // downscale_factor
     lores_h = height // downscale_factor
-    
-    while running and state_event.is_set():
+
+    while state_event.is_set():
         job = None
-        request = None # Inizializza a None per sicurezza
+        request = None
         try:
-            # 1. Avvia la cattura e ottieni un "job". Questo non è bloccante.
+            # Avvia la cattura (non bloccante)
             job = picam2.capture_request(wait=False)
 
-            # 2. Attendi il completamento del job.
-            #    picam2.wait() restituisce un oggetto CompletedRequest in caso di successo,
-            #    o None in caso di timeout.
-            request = picam2.wait(job, timeout=1000) # Timeout di 1 secondo
+            # Attende completamento
+            request = picam2.wait(job, timeout=1000)
 
-#            if request is None:
-#                # Se la richiesta scade, logga un avviso e continua.
-#                # Questo può accadere se il sistema è sotto carico pesante.
-#                logging.warning("[CAPTURE] La richiesta di cattura è scaduta (timeout).")
-#                continue # Salta al prossimo ciclo del loo
-
-            # 3. Prosegui SOLO se abbiamo ricevuto una richiesta completata con successo.
             if request:
                 main_frame_yuv = request.make_array("main")
                 lores_frame_yuv = request.make_array("lores")
-          
+
                 main_frame_gray = main_frame_yuv[:height, :width]
                 lores_frame_gray = lores_frame_yuv[:lores_h, :lores_w]
 
                 frame_queue.put_nowait((main_frame_gray, lores_frame_gray))
-                update_perf_counter("captured")
+
+                if update_perf_counter:
+                    update_perf_counter("captured")
             else:
-                # Se la richiesta è None, il timeout è scaduto. Questo è normale durante
-                # lo shutdown della camera, quindi non logghiamo un errore.
-                logging.warning("[CAPTURE] La richiesta di cattura del frame è scaduta (timeout).")
+                logging.warning("[CAPTURE] Timeout nella cattura del frame.")
                 continue
 
         except queue.Full:
-            pass # Comportamento previsto
+            # La coda è piena: si scarta il frame
+            pass
         except Exception as e:
             if "Camera frontend has timed out" not in str(e):
                 logging.error(f"[CAPTURE] Errore imprevisto: {e}")
         finally:
-            # 4. Rilascia la richiesta SOLO se è un oggetto CompletedRequest valido.
-            #    NON tentare mai di rilasciare il "job".
             if request:
                 request.release()
 
-def processing_thread(state_event, effective_framerate, pre_event_buffer, width, height, current_config):
+    logging.info("[CAPTURE] Thread di cattura terminato.")
+
+def processing_thread(state_event, effective_framerate, pre_event_buffer, width, height, current_config, reference_frame, last_event_time, out, ffmpeg_proc, record_start_time):
     """
     THREAD CRITICO: Il "cervello" della modalità METEOR_FINDER.
     - Consumatore della `frame_queue`.
@@ -582,7 +572,7 @@ def processing_thread(state_event, effective_framerate, pre_event_buffer, width,
     - Gestisce la terminazione di una registrazione entrando in uno stato `is_shutting_down`
       per garantire l'invio affidabile del segnale di stop (`None`) al writer.
     """
-    global reference_frame, last_event_time, out, ffmpeg_proc, record_start_time
+#    global reference_frame, last_event_time, out, ffmpeg_proc, record_start_time
 
     cfg = current_config
 
@@ -695,67 +685,67 @@ def processing_thread(state_event, effective_framerate, pre_event_buffer, width,
         except queue.Full:
             logging.error("[PROCESS] Impossibile inviare il segnale di stop finale. Il video potrebbe non essere finalizzato.")
 
-def writer_thread(state_event):
+def writer_thread(state_event, output_queue, writer_context, update_perf_counter=None):
     """
     THREAD CRITICO: Scrittore dei file video per METEOR_FINDER.
     - Consumatore della `output_queue`.
     - Isola la lenta operazione di I/O su disco.
     - Ascolta un segnale `None` (sentinella) per chiudere e finalizzare correttamente
       il file video, prevenendo la corruzione dei dati.
-    """
-    # Gestisce la scrittura dei frame video su disco.
-    global out, ffmpeg_proc # Still needs access to the global file handles
 
-    # The main loop checks for both the global running flag and the mode-specific event
-    while running and state_event.is_set():
+    Args:
+        state_event (threading.Event): evento per controllare l'esecuzione del thread
+        output_queue (queue.Queue): coda da cui leggere i frame
+        writer_context (dict): dizionario con i riferimenti a ffmpeg_proc e out
+        update_perf_counter (callable, opzionale): funzione per aggiornare i contatori prestazioni
+    """
+
+    ffmpeg_proc = writer_context.get('ffmpeg_proc')
+    out = writer_context.get('out')
+
+    while state_event.is_set():
         try:
-            # Attende un oggetto dalla coda. Potrebbe essere un frame o il segnale di stop (None).
-            item = output_queue.get_nowait()
+            # Attende un oggetto dalla coda (frame o segnale di stop None).
+            item = output_queue.get(timeout=0.1)
 
             # --- Logica di Chiusura Coordinata ---
-            # Controlla se l'oggetto ricevuto è il segnale di "Fine Stream".
             if item is None:
                 logging.info("[WRITE] Segnale di stop ricevuto. Finalizzazione del video in corso...")
 
-                # Chiude in modo sicuro il processo ffmpeg, se attivo
+                # Chiude processo ffmpeg se attivo
                 if ffmpeg_proc:
                     if ffmpeg_proc.stdin:
                         try:
                             ffmpeg_proc.stdin.close()
                         except BrokenPipeError:
-                            # Questo può accadere se il processo è terminato in anticipo, è sicuro ignorarlo.
                             logging.warning("[WRITE] stdin di ffmpeg già chiuso.")
-                            pass
-                    ffmpeg_proc.wait() # Attende che il processo ffmpeg termini completamente
-                    ffmpeg_proc = None # Resetta la variabile globale
+                    ffmpeg_proc.wait()
+                    ffmpeg_proc = None
+                    writer_context['ffmpeg_proc'] = None
 
-                # Chiude in modo sicuro l'oggetto VideoWriter di OpenCV, se attivo
+                # Chiude VideoWriter di OpenCV se attivo
                 if out:
                     out.release()
-                    out = None # Resetta la variabile globale
+                    out = None
+                    writer_context['out'] = None
 
                 logging.info("[WRITE] Video finalizzato e chiuso correttamente.")
-
-                # Continua al prossimo ciclo per attendere un nuovo task (non esce dal loop)
-                continue
+                continue  # Non esce subito, resta pronto ad altri task
 
             # --- Logica di Scrittura del Frame ---
-            # Se l'oggetto non è None, allora è un frame da scrivere.
-            # Scriviamo solo se uno dei writer è effettivamente attivo.
             if out or ffmpeg_proc:
                 try:
                     if ffmpeg_proc:
                         ffmpeg_proc.stdin.write(item.tobytes())
                     elif out:
-                        # Converte al volo in grayscale per i codec non-H264
-#                        frame_gray = item[:height, :width]
                         out.write(item)
-                    update_perf_counter("written") # Se vuoi ripristinare il contatore
+
+                    if update_perf_counter:
+                        update_perf_counter("written")
+
                 except Exception as e:
-                    # Gestisce errori che potrebbero verificarsi durante la scrittura
                     logging.error(f"[WRITE] Errore imprevisto durante la scrittura del frame: {e}")
-                    # In caso di errore grave, è meglio resettare lo stato di registrazione
-                    # per evitare un ciclo di errori.
+                    # Reset di sicurezza in caso di errore grave
                     if ffmpeg_proc and ffmpeg_proc.stdin:
                         try:
                             ffmpeg_proc.stdin.close()
@@ -763,16 +753,55 @@ def writer_thread(state_event):
                             pass
                         ffmpeg_proc.wait()
                         ffmpeg_proc = None
-                        if out:
-                            out.release()
-                            out = None
-#                    recording_event.clear()
+                        writer_context['ffmpeg_proc'] = None
+                    if out:
+                        out.release()
+                        out = None
+                        writer_context['out'] = None
+
         except queue.Empty:
-            # È normale che la coda sia vuota, continua semplicemente ad attendere.
+            # È normale che la coda sia vuota, attende e continua
             time.sleep(0.01)
             continue
 
     logging.info("[WRITER] Thread di scrittura terminato.")
+
+def bridge_for_test(state_event, filename, width, height, framerate, codec, frame_queue, output_queue, writer_context, max_duration=5):
+    """
+    THREAD INTERMEDIO:
+    - Disaccoppia la cattura dalla scrittura.
+    - Inizializza ffmpeg o VideoWriter e li salva in writer_context.
+    - Trasferisce frame dalla frame_queue a output_queue.
+    - Invia un segnale di stop (None) dopo max_duration secondi.
+    """
+    start_time = time.time()
+
+    # Inizializza writer
+    if codec == "h264":
+        writer_context["ffmpeg_proc"] = start_ffmpeg_writer(filename, width, height, framerate)
+    else:
+        fourcc = cv2.VideoWriter_fourcc(*('XVID' if codec == "avi" else 'MJPG'))
+        writer_context["out"] = cv2.VideoWriter(filename, fourcc, framerate, (width, height), isColor=False)
+
+    while state_event.is_set():
+        try:
+            frame_tuple = frame_queue.get(timeout=0.1)
+            output_queue.put(frame_tuple[0])  # passa solo frame ad alta risoluzione
+
+            # Controllo durata
+            if time.time() - start_time > max_duration:
+                logging.info("[PROCESS] Durata test terminata. Arresto in corso...")
+                try:
+                    output_queue.put(None, timeout=0.5)
+                    logging.info("[PROCESS] Segnale di stop inviato al writer.")
+                except queue.Full:
+                    logging.error("[PROCESS] Impossibile inviare il segnale di stop.")
+                break
+
+        except queue.Empty:
+            continue
+
+    logging.info("[PROCESS] Thread bridge terminato.")
 
 def snapshot_writer_thread(state_event):
     """Scrittore dei file snapshot per METEOR_FINDER. Deve controllare `state_event` per terminare correttamente."""
@@ -789,34 +818,31 @@ def snapshot_writer_thread(state_event):
         except Exception as e:
             logging.error(f"[SNAPSHOT] Errore nel salvataggio snapshot: {e}")
 
-def bridge_for_test(state_event, filename, width, height, framerate, codec):
-# Il thread intermedio che disaccoppia la cattura dalla scrittura.
-# is_shutting_down = False
-#    global running
-    global ffmpeg_proc, out
-    start_time = time.time()
+    writer_context = {'ffmpeg_proc': None, 'out': None}
 
     if codec == "h264":
-        ffmpeg_proc = start_ffmpeg_writer(filename, width, height, framerate)
+        writer_context['ffmpeg_proc'] = start_ffmpeg_writer(filename, width, height, framerate)
     else:
-        out = cv2.VideoWriter(filename, fourcc, framerate, (width, height), isColor=False)
-    
-    while running and state_event.is_set():
+        fourcc = cv2.VideoWriter_fourcc(*('XVID' if codec == "avi" else 'MJPG'))
+        writer_context['out'] = cv2.VideoWriter(filename, fourcc, framerate, (width, height), isColor=False)
+
+    while state_event.is_set():
         try:
-           
-            frame_tuple = frame_queue.get(timeout=0.1)					
-            output_queue.put(frame_tuple[0]) # Passa solo il frame ad alta risoluzione
-
-            if time.time() - start_time > 5:
-                logging.info("[PROCESS] Durata registrazione terminata. Inizio procedura di arresto...")
-                try:
-                    output_queue.put(None, timeout=0.5)
-                    logging.info("[PROCESS] Segnale di stop finale inviato prima della terminazione.")
-                except queue.Full:
-                    logging.error("[PROCESS] Impossibile inviare il segnale di stop finale. Il video potrebbe non essere finalizzato.")
-
+            frame_tuple = frame_queue.get(timeout=1)
+            if frame_tuple is None:
+                break
+            main_frame = frame_tuple[0]
+            output_queue.put(main_frame, timeout=1)
         except queue.Empty:
             continue
+        except queue.Full:
+            logging.warning("[BRIDGE] output_queue piena, frame scartato.")
+        except Exception as e:
+            logging.error(f"[BRIDGE] Errore: {e}")
+            break
+
+    output_queue.put(None)  # chiude il writer
+    logging.info("[BRIDGE] Terminato.")
 
 # --- Timelapse Threads ---
 def timelapse_capture_thread(state_event):
@@ -1002,43 +1028,34 @@ def run_auto_test():
     input("\nPremi Invio per tornare al menu principale...")
 
 def run_video_test(current_config):
+    """
+    Esegue un test di registrazione video di 5 secondi con i thread reali,
+    in un ambiente isolato e senza dipendenze da variabili globali.
+    """
 
-#    Esegue un test di registrazione video di 5 secondi.
-
-    global frame_queue, output_queue, picam2, running, state_event 
-    global lock_perf, out, ffmpeg_proc
-    global frames_captured, frames_processed, frames_written, events_triggered
     clear_screen()
     print("\n" + "="*15 + " TEST VIDEO (METEOR FINDER) " + "="*15)
     print(f"{Fore.YELLOW}Questo test registrerà un video di 5 secondi con le impostazioni attuali...{Style.RESET_ALL}")
-    
-    # --- Setup locale e completamente autonomo per il test ---
+
+    # --- Setup locale ---
     picam2 = None
-    ffmpeg_proc = None
+    threads = []
+    out, ffmpeg_proc = None, None
+
+    # Event per controllare l'esecuzione
     state_event = threading.Event()
     state_event.set()
-    out, ffmpeg_proc = None, None
-    lock_perf = threading.Lock()
-    frames_captured, frames_processed, frames_written, events_triggered = 0, 0, 0, 0
-    
-    # Variabili di stato locali per i thread di test
-    running = True
-    
+
+    # Code locali, indipendenti da quelle di produzione
+    frame_queue = queue.Queue(maxsize=current_config.get('frame_queue_maxsize', 30))
+    output_queue = queue.Queue(maxsize=current_config.get('output_queue_maxsize', 150))
+
     try:
         cfg = current_config
         res = RESOLUTIONS[cfg['size']]
-        width, height = res[0], res[1]
-        
-        frame_queue = queue.Queue(maxsize=cfg['frame_queue_maxsize'])
-        output_queue = queue.Queue(maxsize=cfg['output_queue_maxsize'])
-      
-        active_threads = []
-        state_events = {'meteor_finder': threading.Event(), 'timelapse': threading.Event(), 'test_run': threading.Event()}      
+        width, height = res
 
-        picam2 = Picamera2()
-
-		# === CODEC ===
-		# Determina l'estensione del file e il FourCC per i codec non-H264.
+        # === CODEC e filename ===
         if cfg['codec'] == "avi":
             fourcc = cv2.VideoWriter_fourcc(*'XVID')
             extension = "avi"
@@ -1049,91 +1066,103 @@ def run_video_test(current_config):
             fourcc = None
             extension = "mp4"
         else:
-            raise ValueError("Codec non supportato.")		
+            raise ValueError("Codec non supportato.")
 
         output_dir = cfg['output_dir']
         os.makedirs(output_dir, exist_ok=True)
-        filename = os.path.join(cfg['output_dir'], f"video_test.{extension}")
-     
-        # Configurazione Video		
-        lores_w = width // cfg['downscale_factor']
-        lores_h = height // cfg['downscale_factor']
-		
-        meteor_controls = {"FrameDurationLimits": METEOR_EXPOSURE_LIMITS, "AnalogueGain": cfg['gain']}
+        filename = os.path.join(output_dir, f"video_test.{extension}")
+
+        # === Configurazione Camera ===
+        picam2 = Picamera2()
+        lores_w, lores_h = width // cfg['downscale_factor'], height // cfg['downscale_factor']
+
+        meteor_controls = {
+            "FrameDurationLimits": METEOR_EXPOSURE_LIMITS,
+            "AnalogueGain": cfg['gain']
+        }
         if cfg['framerate_mode'] == 'fixed':
             meteor_controls["FrameRate"] = cfg['framerate']
-        else: # La modalità predefinita o dinamica usa i limiti di durata
-            meteor_controls["FrameDurationLimits"] = METEOR_EXPOSURE_LIMITS
-        
+
         video_config = picam2.create_video_configuration(
             main={"size": (width, height), "format": "YUV420"},
             lores={"size": (lores_w, lores_h), "format": "YUV420"},
             controls=meteor_controls
-        )		
-           
+        )
         picam2.configure(video_config)
         picam2.start()
 
         effective_framerate = cfg['framerate']
         if cfg['framerate_mode'] == 'dynamic':
             metadata = picam2.capture_metadata()
-            effective_framerate = metadata.get("FrameRate", cfg['framerate'])       
-        
-        # 2. Definisci i thread di test
-     
-        # 3. Avvia i thread
-        threads = [                           
-			threading.Thread(target=capture_thread_meteor, args=(state_events['test_run'], width, height, cfg['downscale_factor']), daemon=True, name="MeteorCapture"),
-			threading.Thread(target=bridge_for_test, args=(state_events['test_run'], filename, width, height, effective_framerate, cfg['codec']), daemon=True, name="Bridge"),
-			threading.Thread(target=writer_thread, args=(state_events['test_run'],), daemon=True, name="MeteorWriter"),
+            effective_framerate = metadata.get("FrameRate", cfg['framerate'])
+
+        # === Thread reali (ma isolati) ===
+        threads = [
+            threading.Thread(
+                target=capture_thread_meteor,
+                args=(state_event, width, height, cfg['downscale_factor'], frame_queue),
+                daemon=True,
+                name="MeteorCapture"
+            ),
+            threading.Thread(
+                target=bridge_for_test,
+                args=(state_event, filename, width, height, effective_framerate, cfg['codec'], frame_queue, output_queue),
+                daemon=True,
+                name="Bridge"
+            ),
+            threading.Thread(
+                target=writer_thread,
+                args=(state_event, output_queue),
+                daemon=True,
+                name="MeteorWriter"
+            ),
         ]
-        
+
         logging.info(f"[TEST] Avvio registrazione video di test in: {filename}")
-        state_events['test_run'].set()
         for t in threads: t.start()
-        
-        # Nuovo controllo dei thread
-        all_threads_alive = check_threads_status(threads)
 
-        if not all_threads_alive:
-            logging.warning("[TEST] Uno o più thread non sono stati avviati correttamente.")
-            print(f"{Fore.RED}[ATTENZIONE] Uno o più thread non sono attivi! Verifica i log per maggiori dettagli.{Style.RESET_ALL}")
+        # Controllo iniziale thread
+        if check_threads_status(threads):
+            print(f"{Fore.GREEN}[OK] Tutti i thread sono stati avviati correttamente.{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}Registrazione in corso per 5 secondi... Il file verrà salvato come '{filename}'{Style.RESET_ALL}")
         else:
-            logging.info("[TEST] Tutti i thread sono attivi.")
-            print(f"{Fore.GREEN}[OK] Tutti i thread sono stati avviati correttamente.{Style.RESET_ALL}")        
-        
-        time.sleep(5) # Durata del test
-        
-        logging.info("[TEST] Test completato. Arresto dei thread...")
-        
-    except Exception as e:
-        logging.error(f"[TEST] Si è verificato un errore durante il test video: {e}")
-    finally:
-        # 4. Esegui una chiusura pulita e garantita.
-        running = False
-        state_events.clear()
-        
-        if 'test_output_queue' in locals():
-            test_output_queue.put(None)
+            print(f"{Fore.RED}[ERRORE] Uno o più thread non sono partiti. Controlla i log.{Style.RESET_ALL}")
 
-        if 'threads' in locals():
-            for t in threads: t.join(timeout=5)
-        
-        if 'out' in globals() and out: out.release()
-        if 'ffmpeg_proc' in globals() and ffmpeg_proc:
+        # Aspetta 5 secondi, poi invia stop
+        time.sleep(5)
+        state_event.clear()
+        output_queue.put(None)  # Segnale di stop al writer
+
+        logging.info("[TEST] Test completato. Arresto dei thread...")
+
+    except Exception as e:
+        logging.error(f"[TEST] Si è verificato un errore durante il test video: {e}", exc_info=True)
+        print(f"{Fore.RED}[ERRORE] Test fallito. Dettagli nel file di log.{Style.RESET_ALL}")
+
+    finally:
+        # Chiudi i thread
+        for t in threads:
+            t.join(timeout=5)
+
+        # Chiudi writer e processi
+        if out: out.release()
+        if ffmpeg_proc:
             if ffmpeg_proc.stdin:
-                try: ffmpeg_proc.stdin.close()
-                except BrokenPipeError: pass
+                try:
+                    ffmpeg_proc.stdin.close()
+                except BrokenPipeError:
+                    pass
             ffmpeg_proc.wait()
-        logging.info("[MAIN] Uscita completata.")
-        
-        if picam2.started:
-            picam2.stop()
+
+        # Chiudi camera
         if picam2:
+            if picam2.started:
+                picam2.stop()
             picam2.close()
             logging.info("[TEST] Camera di test chiusa correttamente.")
-    
+
     input("\nPremi Invio per tornare al menu principale...")
+
 
 def run_photo_test(current_config):
     """Scatta una singola foto di prova usando le impostazioni TIMELAPSE."""
@@ -1426,10 +1455,10 @@ def run_application():
                         effective_framerate = metadata.get("FrameRate", APP_CONFIG['framerate'])
                     logging.info(f"[CAMERA] Framerate effettivo impostato a: {effective_framerate:.2f} fps")
                     pre_event_buffer = deque(maxlen=int(APP_CONFIG['pre_event_seconds'] * effective_framerate))
-                    active_threads = [                           
-                        threading.Thread(target=capture_thread_meteor, args=(state_events['meteor_finder'], width, height, APP_CONFIG['downscale_factor']), daemon=True, name="MeteorCapture"),
-                        threading.Thread(target=processing_thread, args=(state_events['meteor_finder'], effective_framerate, pre_event_buffer, width, height, APP_CONFIG), daemon=True, name="MeteorProcess"),
-                        threading.Thread(target=writer_thread, args=(state_events['meteor_finder'],), daemon=True, name="MeteorWriter"),
+                    active_threads = [       
+                        threading.Thread(target=capture_thread_meteor, args=(state_events['meteor_finder'], width, height, APP_CONFIG['downscale_factor'], frame_queue, picam2, update_perf_counter), daemon=True, name="MeteorCapture"),
+                        threading.Thread(target=processing_thread, args=(state_events['meteor_finder'], effective_framerate, pre_event_buffer, width, height, APP_CONFIG, reference_frame, last_event_time, out, ffmpeg_proc, record_start_time), daemon=True, name="MeteorProcess"),
+                        threading.Thread(target=writer_thread, args=(state_events['meteor_finder'], output_queue, writer_context, update_perf_counter=None), daemon=True, name="MeteorWriter"),
                         threading.Thread(target=snapshot_writer_thread, args=(state_events['meteor_finder'],), daemon=True, name="MeteorSnapshot")
                     ]
                     state_events['meteor_finder'].set()
