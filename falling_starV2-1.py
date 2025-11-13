@@ -48,7 +48,6 @@ import io
 import paramiko
 import ntplib
 import csv
-import html
 import requests             
 from collections import Counter
 from zipfile import ZipFile
@@ -58,7 +57,6 @@ from collections import deque
 from datetime import datetime, timezone, time as dtime
 from logging.handlers import RotatingFileHandler
 from picamera2 import Picamera2
-from collections import namedtuple  # testing porpuse
 from pydantic import BaseModel, Field, conint, confloat, constr, field_validator
 from typing import Tuple, Optional, List
 from astral.sun import sun
@@ -648,7 +646,7 @@ class SFTPUploader:
             # This will now catch timeout errors, authentication errors, and name resolution errors.
             msg = f"SFTP connection failed: {e}"
             logging.error(msg)
-            self.pipeline_instance.log_health_event("ERROR", "SFTP_connection_failed", msg)
+            self.pipeline_instance.log_health_event("WARNING", "SFTP_connection_failed", msg)
             return None, None
 
     def get_status(self):
@@ -992,7 +990,7 @@ class Pipeline:
         shutdown_delay_sec = self.cfg["power_monitor"].get("shutdown_delay_sec", 60)
         check_interval = 2  # Delay between check.
         
-        line = None
+        line_request = None
         try:
             settings = gpiod.LineSettings(
                 direction=gpiod.line.Direction.INPUT,
@@ -1006,7 +1004,8 @@ class Pipeline:
             logging.info(f"Power monitor started on GPIO pin {power_pin} (shutdown delay: {shutdown_delay_sec}s).")
         except Exception:
             logging.exception("Failed to initialize GPIO pin %d for power monitor. The thread will now exit.", power_pin)
-            if line_request: line_request.release()
+            if line_request:
+                line_request.release()
             return
 
         power_lost = False
@@ -1053,8 +1052,8 @@ class Pipeline:
                 logging.exception("An error occurred in the power monitor loop. The thread will exit.")
                 break # Exit the loop on error
         
-        if line:
-            line.release()
+        if line_request:
+            line_request.release()
 
     # ----------------- schedule control -----------------
     def within_schedule(self):
